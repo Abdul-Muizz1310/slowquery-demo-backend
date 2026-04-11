@@ -1,43 +1,34 @@
 """Alembic async env for slowquery_demo.
 
-target_metadata is None in S1 because there are no SQLAlchemy models yet.
-S4 will wire in ``slowquery_demo.models.Base.metadata`` when the four demo
-tables + the four bookkeeping tables land.
+``target_metadata`` points at ``slowquery_demo.models.Base.metadata``.
+Importing the package registers all eight ORM classes via
+``models/__init__.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from logging.config import fileConfig
-from typing import Any
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
+from slowquery_demo.core.db_config import get_database_url
+from slowquery_demo.models import Base
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata: Any = None
-
-
-def _get_url() -> str:
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise RuntimeError(
-            "DATABASE_URL environment variable is required to run alembic migrations"
-        )
-    return url
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=_get_url(),
+        url=get_database_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -54,7 +45,7 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     cfg = config.get_section(config.config_ini_section, {}) or {}
-    cfg["sqlalchemy.url"] = _get_url()
+    cfg["sqlalchemy.url"] = get_database_url()
     connectable = async_engine_from_config(
         cfg,
         prefix="sqlalchemy.",
