@@ -31,16 +31,23 @@ def fake_locust_stats_high_failures():  # type: ignore[no-untyped-def]
 
 
 @pytest.fixture(autouse=True)
-def _isolated_branch_state(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
-    """Redirect ``.branch_state`` to a per-test tmp path.
+def _isolated_runtime(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """Isolate each test from on-disk state that would leak across tests.
 
-    ``BranchSwitcher`` writes the active branch to a file on every
-    successful switch. Without this fixture the file would leak
-    between tests and make test order relevant. Applied automatically
-    to every test in the suite.
+    Two redirections per test:
+
+    1. ``BRANCH_STATE_FILE`` points at ``tmp_path/.branch_state`` so the
+       branch switcher's persistence file doesn't accumulate across
+       tests and make ordering relevant.
+    2. ``cwd`` is set to ``tmp_path`` so :class:`Settings`' default
+       ``env_file=".env"`` looks at the tmp dir instead of the real
+       repo-root ``.env``. Tests that monkeypatch individual env vars
+       need to see those changes without the real ``.env`` adding
+       its own values back in.
     """
     state_file = tmp_path / ".branch_state"
     monkeypatch.setenv("BRANCH_STATE_FILE", str(state_file))
+    monkeypatch.chdir(tmp_path)
     yield
 
 

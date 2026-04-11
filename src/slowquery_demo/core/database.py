@@ -12,16 +12,17 @@ from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from slowquery_demo.core.db_config import get_database_url
+from slowquery_demo.core.db_config import get_database_url, normalise_asyncpg_url
 
 
 def build_engine(url: str | None = None) -> tuple[object, async_sessionmaker[AsyncSession]]:
     """Build an async engine + session factory against ``url``.
 
-    Returns a tuple because ``create_async_engine`` returns a concrete
-    ``AsyncEngine`` instance and callers sometimes want both halves.
+    The incoming URL is normalised via :func:`normalise_asyncpg_url` so
+    Settings-driven callers (e.g. ``create_app()``) can pass a raw Neon
+    libpq connection string and still get a working engine.
     """
-    resolved = url or get_database_url()
+    resolved = normalise_asyncpg_url(url) if url else get_database_url()
     engine = create_async_engine(resolved, future=True)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     return engine, factory
