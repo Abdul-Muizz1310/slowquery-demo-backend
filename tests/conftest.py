@@ -14,6 +14,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture
+def fake_locust_stats_high_p95():  # type: ignore[no-untyped-def]
+    """Stats payload whose p95 exceeds the traffic generator's threshold."""
+    from scripts.traffic_generator import TrafficStats
+
+    return TrafficStats(total=100, failures=0, p95_ms=40_000.0)
+
+
+@pytest.fixture
+def fake_locust_stats_high_failures():  # type: ignore[no-untyped-def]
+    """Stats payload whose failure rate exceeds the traffic generator's threshold."""
+    from scripts.traffic_generator import TrafficStats
+
+    return TrafficStats(total=100, failures=50, p95_ms=10.0)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_branch_state(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     """Redirect ``.branch_state`` to a per-test tmp path.

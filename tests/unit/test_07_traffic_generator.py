@@ -47,8 +47,9 @@ def test_tasks_do_not_hit_platform_endpoints() -> None:
         assert path not in body, f"traffic generator must not hit {path}"
 
 
+@pytest.mark.slow
 def test_unreachable_host_exits_nonzero() -> None:
-    """Spec 07 test 8."""
+    """Spec 07 test 8. Marked @slow — spawns a subprocess for ~2s."""
     import subprocess
     import sys
 
