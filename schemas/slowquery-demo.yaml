@@ -1,0 +1,53 @@
+service:
+  name: slowquery_demo
+  description: Live demo backend for slowquery-detective (1M-row Neon dataset, slow/fast branch switching)
+  python: "3.12"
+
+models:
+  - name: User
+    fields:
+      - { name: id, type: uuid, primary: true }
+      - { name: email, type: str, unique: true, indexed: true, max_length: 255 }
+      - { name: full_name, type: str, max_length: 100 }
+      - { name: created_at, type: datetime, default: now }
+
+  - name: Product
+    fields:
+      - { name: id, type: uuid, primary: true }
+      - { name: sku, type: str, unique: true, indexed: true, max_length: 64 }
+      - { name: name, type: str, max_length: 200 }
+      - { name: price_cents, type: int }
+      - { name: created_at, type: datetime, default: now }
+
+  - name: Order
+    fields:
+      - { name: id, type: uuid, primary: true }
+      - { name: user_id, type: uuid }
+      - { name: status, type: enum, values: [pending, paid, shipped, cancelled], default: pending }
+      - { name: total_cents, type: int }
+      - { name: created_at, type: datetime, default: now }
+
+  - name: OrderItem
+    fields:
+      - { name: id, type: uuid, primary: true }
+      - { name: order_id, type: uuid }
+      - { name: product_id, type: uuid }
+      - { name: quantity, type: int }
+      - { name: unit_price_cents, type: int }
+
+endpoints:
+  - { method: GET, path: "/users",       handler: users.list,       auth: any, paginate: cursor }
+  - { method: GET, path: "/users/{id}",  handler: users.get,        auth: any }
+  - { method: GET, path: "/products",    handler: products.list,    auth: any, paginate: cursor }
+  - { method: GET, path: "/orders",      handler: orders.list,      auth: any, paginate: cursor }
+  - { method: GET, path: "/orders/{id}", handler: orders.get,       auth: any }
+  - { method: GET, path: "/order_items", handler: order_items.list, auth: any, paginate: cursor }
+
+observability:
+  metrics: prometheus
+  tracing: otel
+  logging: structlog
+
+deploy:
+  target: render
+  health: /health

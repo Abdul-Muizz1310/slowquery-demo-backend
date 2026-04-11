@@ -1,0 +1,7 @@
+# WHY
+
+A slow-query detector that you have to take on faith isn't worth much. When I was writing [`slowquery-detective`](https://pypi.org/project/slowquery-detective/), the hardest thing to get right wasn't the fingerprinting or the rules engine — it was the feeling that someone reading my CV could verify the claim in under a minute. So this repo exists for one reason: to make the 1200ms → 18ms drop reproducible on a live URL, against a real 1M-row Postgres dataset, with one button click.
+
+The trick is Neon's branching. Two branches, identical rows, one with three missing indexes and one with them in place. The `POST /branches/switch` endpoint flips which branch the service's connection pool points at, restarts the pool, and the dashboard's p95 line graph drops from the red zone to the green zone within a couple of seconds. The rules engine in the middleware lights up on exactly the sequential scans and missing-FK-index patterns it was designed to catch. The before/after is the demo — nothing to squint at.
+
+Everything about this service is deliberately boring so the middleware can be the interesting part. Feathers scaffolds the MVC layers. Alembic owns the schema. The seed scripts are straightforward batch inserts into the two branches. The only hand-written endpoints are the branch switch, and the dashboard API router that `slowquery-detective` already ships. When someone wants to see the tool work, I can hand them a URL instead of a blog post.

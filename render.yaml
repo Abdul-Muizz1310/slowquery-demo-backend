@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: slowquery_demo
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_FAST
+        sync: false
+      - key: BRANCH_CURRENT
+        value: slow
+      - key: SLOWQUERY_THRESHOLD_MS
+        value: "100"
+      - key: SLOWQUERY_SAMPLE_RATE
+        value: "1.0"
+      - key: SLOWQUERY_STORE_URL
+        sync: false
+      - key: NEON_API_KEY
+        sync: false
+      - key: NEON_PROJECT_ID
+        sync: false
+      - key: LLM_FALLBACK_ENABLED
+        value: "true"
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_BASE_URL
+        sync: false
+      - key: OPENROUTER_MODEL_PRIMARY
+        sync: false
+      - key: CORS_ORIGINS
+        value: "https://slowquery-dashboard-frontend.vercel.app,http://localhost:3000"
+      - key: DEMO_MODE
+        value: "true"
+      - key: PORT
+        value: "8000"
