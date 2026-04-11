@@ -20,7 +20,7 @@ from slowquery_demo.core.branch_state import load_branch
 from slowquery_demo.core.config import Settings
 from slowquery_demo.core.database import build_engine
 from slowquery_demo.core.errors import register_exception_handlers
-from slowquery_demo.core.observability import install_slowquery
+from slowquery_demo.core.observability import install_slowquery, slowquery_lifespan
 from slowquery_demo.core.platform import install_platform_middleware
 from slowquery_demo.services.branch_switcher import BranchSwitcher
 
@@ -29,7 +29,7 @@ def create_app() -> FastAPI:
     settings = Settings()
     engine, _factory = build_engine(settings.database_url)
 
-    app = FastAPI(title="slowquery_demo", version="0.1.0")
+    app = FastAPI(title="slowquery_demo", version="0.1.0", lifespan=slowquery_lifespan)
     install_platform_middleware(app, service_name="slowquery_demo")
     register_exception_handlers(app)
 
