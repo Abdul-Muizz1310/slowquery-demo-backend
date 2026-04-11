@@ -1,25 +1,14 @@
 #!/usr/bin/env bash
-# One-shot secret propagation from workspace .env to GitHub Actions.
-# Run after `gh repo create` and whenever secrets rotate.
+# Thin wrapper around scripts/set_secrets.py.
+#
+# The original bash implementation ``source``d the workspace .env, which
+# broke on two real-world .env shapes:
+#   1. URL values containing ``&`` (e.g. sslmode=require&channel_binding=...)
+#      - bash interprets ``&`` as a background-command separator.
+#   2. Lines with trailing decorative comments containing non-ASCII
+#      characters - Windows stdout defaults to cp1252 and chokes.
+# The Python script handles both cases and pipes secrets to ``gh secret set``
+# as raw UTF-8 bytes via stdin.
 set -euo pipefail
 
-source "$(dirname "$0")/../../.env"
-REPO=Abdul-Muizz1310/slowquery-demo-backend
-
-# Neon
-gh secret set DATABASE_URL       --repo "$REPO" --body "$NEON_DB_URL_SLOWQUERY"
-gh secret set DATABASE_URL_FAST  --repo "$REPO" --body "$NEON_DB_URL_SLOWQUERY_FAST"
-gh secret set NEON_API_KEY       --repo "$REPO" --body "$NEON_API_KEY"
-gh secret set NEON_PROJECT_ID    --repo "$REPO" --body "$NEON_PROJECT_ID"
-
-# OpenRouter (LLM fallback for the rules-engine explainer)
-gh secret set OPENROUTER_API_KEY      --repo "$REPO" --body "$OPENROUTER_API_KEY"
-gh secret set OPENROUTER_BASE_URL     --repo "$REPO" --body "$OPENROUTER_BASE_URL"
-gh secret set OPENROUTER_MODEL_PRIMARY --repo "$REPO" --body "$OPENROUTER_MODEL_PRIMARY"
-
-# Render deploy hook (fill RENDER_DEPLOY_HOOK_SLOWQUERY in workspace .env after Render service exists)
-if [[ -n "${RENDER_DEPLOY_HOOK_SLOWQUERY:-}" ]]; then
-  gh secret set RENDER_DEPLOY_HOOK --repo "$REPO" --body "$RENDER_DEPLOY_HOOK_SLOWQUERY"
-else
-  echo "note: RENDER_DEPLOY_HOOK_SLOWQUERY not set in workspace .env; skipping (deploy job will no-op)."
-fi
+exec uv run python "$(dirname "$0")/set_secrets.py" "$@"
