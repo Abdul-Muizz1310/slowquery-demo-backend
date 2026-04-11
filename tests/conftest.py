@@ -13,8 +13,19 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from slowquery_demo.core.database import get_db
-from slowquery_demo.main import create_app
+
+@pytest.fixture(autouse=True)
+def _isolated_branch_state(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """Redirect ``.branch_state`` to a per-test tmp path.
+
+    ``BranchSwitcher`` writes the active branch to a file on every
+    successful switch. Without this fixture the file would leak
+    between tests and make test order relevant. Applied automatically
+    to every test in the suite.
+    """
+    state_file = tmp_path / ".branch_state"
+    monkeypatch.setenv("BRANCH_STATE_FILE", str(state_file))
+    yield
 
 
 @pytest.fixture
@@ -41,6 +52,9 @@ class _EmptyScalars:
 @pytest.fixture
 def test_client(empty_session: AsyncMock) -> Iterator[TestClient]:
     """TestClient against a fresh app with ``get_db`` overridden."""
+    from slowquery_demo.core.database import get_db
+    from slowquery_demo.main import create_app
+
     app = create_app()
 
     async def _override() -> AsyncGenerator[AsyncMock, None]:
