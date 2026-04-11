@@ -72,17 +72,26 @@ def test_refuses_production_like_fast_url(monkeypatch) -> None:  # type: ignore[
 
 
 def test_create_index_appears_only_in_fast_indexes_constant() -> None:
-    """Spec 03 test 15."""
+    """Spec 03 test 15: every CREATE INDEX lives in the FAST_INDEXES tuple.
+
+    The original S3 regex tried to extract the tuple body and count
+    occurrences inside vs outside. It broke on SQL strings containing
+    parentheses (``orders(user_id)``). The intent is simpler: the file
+    must contain exactly ``len(FAST_INDEXES)`` CREATE INDEX statements,
+    and every one of them must be the body of a FAST_INDEXES entry.
+    """
+    from scripts.seed_fast import FAST_INDEXES
+
     body = SEED_FAST.read_text(encoding="utf-8")
-    constant_match = re.search(r"FAST_INDEXES[^=]*=\s*\((.+?)\)", body, re.DOTALL)
-    assert constant_match is not None, "FAST_INDEXES constant must exist"
-    constant_block = constant_match.group(1)
-    # Count CREATE INDEX in the whole file vs. in the constant block.
     total = len(re.findall(r"CREATE\s+INDEX", body, re.IGNORECASE))
-    in_constant = len(re.findall(r"CREATE\s+INDEX", constant_block, re.IGNORECASE))
-    assert total == in_constant == 3, (
-        "every CREATE INDEX must be inside FAST_INDEXES, and there must be exactly 3"
+    assert total == len(FAST_INDEXES) == 3, (
+        f"expected 3 CREATE INDEX statements, found {total} in file, "
+        f"{len(FAST_INDEXES)} in FAST_INDEXES"
     )
+    for sql in FAST_INDEXES:
+        assert "CREATE INDEX" in sql.upper(), (
+            f"FAST_INDEXES entry must be a CREATE INDEX statement: {sql!r}"
+        )
 
 
 def test_no_extra_index_flag() -> None:
