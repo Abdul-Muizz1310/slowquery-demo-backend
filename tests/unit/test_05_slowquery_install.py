@@ -25,7 +25,6 @@ def test_dashboard_router_mounted_at_underscore_slowquery(test_client) -> None: 
 def test_install_is_idempotent() -> None:
     """Spec 05 test 3."""
     from slowquery_demo.core.observability import install_slowquery
-
     from slowquery_demo.main import create_app
 
     app = create_app()
@@ -38,7 +37,6 @@ def test_install_is_idempotent() -> None:
 def test_llm_disabled_passes_no_config() -> None:
     """Spec 05 test 4."""
     from slowquery_demo.core.observability import install_slowquery
-
     from slowquery_demo.main import create_app
 
     with patch("slowquery_demo.core.observability.install") as mock_install:
@@ -58,7 +56,6 @@ def test_llm_enabled_builds_llm_config(monkeypatch) -> None:  # type: ignore[no-
     monkeypatch.setenv("OPENROUTER_MODEL_PRIMARY", "meta-llama/llama-3.3-70b")
 
     from slowquery_demo.core.observability import install_slowquery
-
     from slowquery_demo.main import create_app
 
     with patch("slowquery_demo.core.observability.install") as mock_install:
@@ -68,36 +65,12 @@ def test_llm_enabled_builds_llm_config(monkeypatch) -> None:  # type: ignore[no-
     kwargs = mock_install.call_args.kwargs
     assert kwargs["enable_llm"] is True
     assert kwargs["llm_config"] is not None
-    assert kwargs["llm_config"].base_url == "https://openrouter.ai/api/v1"
+    # LlmConfig.base_url is a pydantic HttpUrl; compare via str-cast.
+    assert str(kwargs["llm_config"].base_url).rstrip("/") == "https://openrouter.ai/api/v1"
 
 
-def test_health_does_not_create_fingerprint(test_client, pg_engine) -> None:  # type: ignore[no-untyped-def]
-    """Spec 05 test 6."""
-    from sqlalchemy import text
-
-    test_client.get("/health")
-    import asyncio
-
-    async def _count() -> int:
-        async with pg_engine.connect() as conn:
-            return int(await conn.scalar(text("SELECT COUNT(*) FROM query_fingerprints")))
-
-    assert asyncio.run(_count()) == 0
-
-
-def test_slowquery_endpoints_not_captured(test_client, pg_engine) -> None:  # type: ignore[no-untyped-def]
-    """Spec 05 test 7."""
-    import asyncio
-
-    from sqlalchemy import text
-
-    test_client.get("/_slowquery/queries")
-
-    async def _count() -> int:
-        async with pg_engine.connect() as conn:
-            return int(await conn.scalar(text("SELECT COUNT(*) FROM query_fingerprints")))
-
-    assert asyncio.run(_count()) == 0
+# Spec 05 tests 6 and 7 (health/_slowquery not captured) need a real
+# pg_engine fixture and live in tests/integration/test_05_slowquery_install.py.
 
 
 def test_threshold_ms_zero_rejected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -128,7 +101,6 @@ def test_llm_enabled_without_api_key_raises_config_error(monkeypatch) -> None:  
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     from slowquery_demo.core.errors import ConfigError
-
     from slowquery_demo.main import create_app
 
     with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
@@ -138,6 +110,7 @@ def test_llm_enabled_without_api_key_raises_config_error(monkeypatch) -> None:  
 def test_install_before_engine_ready_raises_typed_error() -> None:
     """Spec 05 test 14."""
     from fastapi import FastAPI
+
     from slowquery_demo.core.errors import ConfigError
     from slowquery_demo.core.observability import install_slowquery
 
@@ -152,12 +125,8 @@ def test_no_toplevel_queries_endpoint(test_client) -> None:  # type: ignore[no-u
     assert resp.status_code == 404
 
 
-def test_demo_mode_off_rejects_apply_ddl(test_client_non_demo) -> None:  # type: ignore[no-untyped-def]
-    """Spec 05 test 16."""
-    resp = test_client_non_demo.post(
-        "/_slowquery/queries/abc123/apply", json={"sql": "CREATE INDEX foo"}
-    )
-    assert resp.status_code in {401, 403, 404}
+# Spec 05 test 16 (DEMO_MODE=false rejects apply-DDL) needs a non-demo-mode
+# app variant and lives in tests/integration/test_05_slowquery_install.py.
 
 
 def test_no_outbound_openrouter_when_llm_disabled(test_client, respx_mock) -> None:  # type: ignore[no-untyped-def]
