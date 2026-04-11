@@ -11,8 +11,9 @@ async def test_small_run_produces_exact_row_counts(pg_engine) -> None:  # type: 
     """Spec 02 test 6."""
     import asyncio
 
-    from scripts.seed_slow import main
     from sqlalchemy import text
+
+    from scripts.seed_slow import main
 
     await asyncio.to_thread(
         lambda: asyncio.run(
@@ -84,8 +85,9 @@ async def test_reset_is_idempotent(pg_engine) -> None:  # type: ignore[no-untype
     """Spec 02 test 9."""
     import asyncio
 
-    from scripts.seed_slow import main
     from sqlalchemy import text
+
+    from scripts.seed_slow import main
 
     for _ in range(2):
         await asyncio.to_thread(

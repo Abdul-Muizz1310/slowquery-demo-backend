@@ -14,8 +14,9 @@ pytestmark = pytest.mark.integration
 
 async def test_alembic_upgrade_creates_every_table(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 00 test 8."""
-    from slowquery_demo.models.base import Base  # noqa: F401 — side-effect import
     from sqlalchemy import inspect
+
+    from slowquery_demo.models.base import Base  # noqa: F401 — side-effect import
 
     async with pg_engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: sorted(inspect(sync).get_table_names()))
@@ -51,6 +52,7 @@ async def test_autogenerate_reports_empty_diff(pg_engine) -> None:  # type: igno
     """Spec 00 test 10: target_metadata matches reality."""
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
+
     from slowquery_demo.models.base import Base
 
     async with pg_engine.connect() as conn:

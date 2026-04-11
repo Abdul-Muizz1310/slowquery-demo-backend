@@ -9,8 +9,9 @@ pytestmark = pytest.mark.integration
 
 async def test_upsert_fingerprint_inserts_row(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 01 test 9."""
-    from slowquery_demo.services.store import PostgresStoreWriter
     from sqlalchemy import text
+
+    from slowquery_demo.services.store import PostgresStoreWriter
 
     writer = PostgresStoreWriter(store_url=str(pg_engine.url))
     await writer.upsert_fingerprint("abc123", "SELECT * FROM t WHERE id = ?")
@@ -28,8 +29,9 @@ async def test_upsert_fingerprint_inserts_row(pg_engine) -> None:  # type: ignor
 
 async def test_upsert_fingerprint_twice_bumps_call_count(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 01 test 10."""
-    from slowquery_demo.services.store import PostgresStoreWriter
     from sqlalchemy import text
+
+    from slowquery_demo.services.store import PostgresStoreWriter
 
     writer = PostgresStoreWriter(store_url=str(pg_engine.url))
     await writer.upsert_fingerprint("abc123", "SELECT 1")
@@ -47,8 +49,9 @@ async def test_upsert_fingerprint_twice_bumps_call_count(pg_engine) -> None:  # 
 async def test_record_sample_rolling_percentiles_match_numpy(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 01 test 11."""
     import numpy as np
-    from slowquery_demo.services.store import PostgresStoreWriter
     from sqlalchemy import text
+
+    from slowquery_demo.services.store import PostgresStoreWriter
 
     writer = PostgresStoreWriter(store_url=str(pg_engine.url))
     await writer.upsert_fingerprint("abc", "SELECT 1")
@@ -89,8 +92,9 @@ async def test_rolling_window_discards_stale_samples(pg_engine) -> None:  # type
 
 async def test_upsert_plan_replaces_row(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 01 test 13."""
-    from slowquery_demo.services.store import PostgresStoreWriter
     from sqlalchemy import text
+
+    from slowquery_demo.services.store import PostgresStoreWriter
 
     writer = PostgresStoreWriter(store_url=str(pg_engine.url))
     await writer.upsert_fingerprint("abc", "SELECT 1")
@@ -108,9 +112,10 @@ async def test_upsert_plan_replaces_row(pg_engine) -> None:  # type: ignore[no-u
 
 async def test_insert_suggestions_dedupes_on_conflict(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 01 test 14."""
-    from slowquery_demo.services.store import PostgresStoreWriter
     from slowquery_detective.rules.base import Suggestion
     from sqlalchemy import text
+
+    from slowquery_demo.services.store import PostgresStoreWriter
 
     writer = PostgresStoreWriter(store_url=str(pg_engine.url))
     await writer.upsert_fingerprint("abc", "SELECT 1")

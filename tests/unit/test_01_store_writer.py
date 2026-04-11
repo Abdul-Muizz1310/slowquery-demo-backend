@@ -93,8 +93,9 @@ async def test_insert_suggestions_empty_list_is_noop() -> None:
 
 async def test_insert_suggestions_batch_insert_one_statement() -> None:
     """Spec 01 test 6."""
-    from slowquery_demo.services.store import PostgresStoreWriter
     from slowquery_detective.rules.base import Suggestion
+
+    from slowquery_demo.services.store import PostgresStoreWriter
 
     pool, conn = _make_pool_mock()
     writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)

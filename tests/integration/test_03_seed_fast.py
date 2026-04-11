@@ -83,8 +83,9 @@ async def test_reset_twice_is_idempotent(pg_engine_fast) -> None:  # type: ignor
     """Spec 03 test 9."""
     import asyncio
 
-    from scripts.seed_fast import main
     from sqlalchemy import text
+
+    from scripts.seed_fast import main
 
     for _ in range(2):
         await asyncio.to_thread(
@@ -113,8 +114,9 @@ async def test_rerun_without_reset_is_noop(pg_engine_fast) -> None:  # type: ign
     """Spec 03 test 10."""
     import asyncio
 
-    from scripts.seed_fast import main
     from sqlalchemy import text
+
+    from scripts.seed_fast import main
 
     async with pg_engine_fast.connect() as conn:
         users_before = await conn.scalar(text("SELECT COUNT(*) FROM users"))
