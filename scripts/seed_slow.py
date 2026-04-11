@@ -72,7 +72,7 @@ def parse_args(argv: list[str] | None = None) -> SeedArgs:
     )
 
 
-_SAFE_HOST_MARKERS = ("slowquery", "localhost", "127.0.0.1")
+_SAFE_HOST_MARKERS = ("slowquery", "localhost", "127.0.0.1", "neon.tech")
 
 
 def _is_safe_url(url: str) -> bool:
@@ -107,7 +107,9 @@ async def main(argv: list[str] | None = None) -> None:
 async def _run_seed(url: str, args: SeedArgs) -> None:
     import asyncpg  # local import — keeps unit tests fast and cheap
 
-    conn = await asyncpg.connect(dsn=url)
+    from slowquery_demo.core.db_config import to_raw_asyncpg_dsn
+
+    conn = await asyncpg.connect(dsn=to_raw_asyncpg_dsn(url))
     try:
         if args.reset:
             await conn.execute(

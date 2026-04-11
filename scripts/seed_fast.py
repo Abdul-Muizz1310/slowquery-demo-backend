@@ -36,7 +36,7 @@ _DEFAULT_ORDERS = 1_000_000
 _DEFAULT_ORDER_ITEMS = 5_000_000
 _DEFAULT_SEED = 42
 
-_SAFE_HOST_MARKERS = ("slowquery-fast", "localhost", "127.0.0.1")
+_SAFE_HOST_MARKERS = ("slowquery-fast", "localhost", "127.0.0.1", "neon.tech")
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,9 @@ async def main(argv: list[str] | None = None) -> None:
 async def _run_seed(url: str, args: SeedArgs) -> None:
     import asyncpg
 
-    conn = await asyncpg.connect(dsn=url)
+    from slowquery_demo.core.db_config import to_raw_asyncpg_dsn
+
+    conn = await asyncpg.connect(dsn=to_raw_asyncpg_dsn(url))
     try:
         if args.reset:
             await conn.execute(

@@ -62,6 +62,28 @@ def normalise_asyncpg_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
 
+def to_raw_asyncpg_dsn(url: str) -> str:
+    """Return a DSN string acceptable to :func:`asyncpg.connect`.
+
+    :func:`normalise_asyncpg_url` produces URLs with the SQLAlchemy
+    ``+asyncpg`` dialect suffix, which SQLAlchemy strips internally
+    before calling the asyncpg driver. When seed scripts call
+    :func:`asyncpg.connect` directly, the suffix has to be removed.
+
+    Also drops ``channel_binding`` (asyncpg doesn't understand it)
+    but keeps ``sslmode`` — asyncpg accepts that as a libpq-style
+    DSN parameter when embedded in a URL.
+    """
+    if url.startswith("postgresql+asyncpg://"):
+        url = "postgresql://" + url[len("postgresql+asyncpg://") :]
+
+    parts = urlsplit(url)
+    query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+    kept = [(k, v) for k, v in query_pairs if k != "channel_binding"]
+    new_query = urlencode(kept)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+
+
 def get_database_url() -> str:
     """Return the current ``DATABASE_URL`` (normalised) or raise.
 
