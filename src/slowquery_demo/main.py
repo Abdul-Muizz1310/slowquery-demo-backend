@@ -27,7 +27,7 @@ from slowquery_demo.services.branch_switcher import BranchSwitcher
 
 def create_app() -> FastAPI:
     settings = Settings()
-    engine, _factory = build_engine(settings.database_url)
+    engine, session_factory = build_engine(settings.database_url)
 
     app = FastAPI(title="slowquery_demo", version="0.1.0", lifespan=slowquery_lifespan)
     install_platform_middleware(app, service_name="slowquery_demo")
@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
 
     app.state.settings = settings
     app.state.engine = engine
+    app.state.db_sessionmaker = session_factory
     app.state.branch_current = load_branch()
     app.state.branch_switcher = BranchSwitcher(
         initial=app.state.branch_current,
