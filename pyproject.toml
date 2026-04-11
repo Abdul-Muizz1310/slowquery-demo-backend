@@ -50,6 +50,10 @@ strict = true
 packages = ["slowquery_demo"]
 mypy_path = "src"
 
+[[tool.mypy.overrides]]
+module = ["asyncpg"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
