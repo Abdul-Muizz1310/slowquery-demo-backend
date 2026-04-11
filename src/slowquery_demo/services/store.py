@@ -80,8 +80,14 @@ class PostgresStoreWriter(StoreWriter):
             raise StoreWriterError("store writer is closed")
         if self._pool is not None:
             return self._pool
+        # Library passes ``store_url`` through as-is from Settings, which
+        # may carry the SQLAlchemy ``+asyncpg`` dialect suffix and libpq
+        # query params. asyncpg rejects both, so normalise here.
+        from slowquery_demo.core.db_config import to_raw_asyncpg_dsn
+
+        dsn = to_raw_asyncpg_dsn(self._store_url)
         try:
-            self._pool = await asyncpg.create_pool(dsn=self._store_url, min_size=1, max_size=4)
+            self._pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=4)
         except Exception as exc:  # pragma: no cover - exercised via integration
             raise StoreWriterError(f"failed to build asyncpg pool: {exc}") from exc
         return self._pool
