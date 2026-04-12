@@ -15,13 +15,27 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 _Handler = Callable[[Request], Awaitable[Response]]
 
+_CORS_ORIGINS = [
+    "https://slowquery-dashboard-frontend.vercel.app",
+    "http://localhost:3000",
+]
+
 
 def install_platform_middleware(app: FastAPI, *, service_name: str) -> None:
-    """Attach platform endpoints and request-id middleware to ``app``."""
+    """Attach platform endpoints, CORS, and request-id middleware to ``app``."""
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
 
     @app.middleware("http")
     async def _request_id_middleware(request: Request, call_next: _Handler) -> Response:
