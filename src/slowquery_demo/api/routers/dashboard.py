@@ -57,6 +57,20 @@ def _extract_rule(suggestion_rationale: str, suggestion_source: str) -> str | No
     return None
 
 
+@router.get("/debug/db-info")
+async def debug_db_info(session: DbSession) -> dict[str, object]:
+    """Temporary: show DB host + table counts for diagnosing empty queries."""
+    from sqlalchemy import text
+
+    fp_count = (await session.execute(text("SELECT count(*) FROM query_fingerprints"))).scalar()
+    db_url = str(session.bind.url) if session.bind else "no-bind"  # type: ignore[union-attr]
+    # Mask credentials — show only the host portion
+    host = "unknown"
+    if "@" in db_url:
+        host = db_url.split("@")[1].split("/")[0]
+    return {"host": host, "query_fingerprints": fp_count}
+
+
 @router.get("/queries")
 async def list_queries(session: DbSession) -> list[FingerprintResponse]:
     """Return all captured fingerprints sorted by total_ms desc."""
