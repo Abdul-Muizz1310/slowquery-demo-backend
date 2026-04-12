@@ -20,10 +20,7 @@ from slowquery_demo.models.slowquery_store import (
 
 async def list_fingerprints(session: AsyncSession) -> list[QueryFingerprint]:
     """All fingerprints, sorted by total_ms descending."""
-    stmt = (
-        select(QueryFingerprint)
-        .order_by(QueryFingerprint.total_ms.desc(), QueryFingerprint.id)
-    )
+    stmt = select(QueryFingerprint).order_by(QueryFingerprint.total_ms.desc(), QueryFingerprint.id)
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
@@ -49,9 +46,7 @@ async def list_suggestions_for_fingerprint(
     return list(result.scalars().all())
 
 
-async def get_explain_plan(
-    session: AsyncSession, fingerprint_id: str
-) -> ExplainPlan | None:
+async def get_explain_plan(session: AsyncSession, fingerprint_id: str) -> ExplainPlan | None:
     result = await session.execute(
         select(ExplainPlan).where(ExplainPlan.fingerprint_id == fingerprint_id)
     )

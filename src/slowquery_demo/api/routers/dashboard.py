@@ -81,9 +81,7 @@ async def list_queries(session: DbSession) -> list[FingerprintResponse]:
 
 
 @router.get("/queries/{fingerprint_id}")
-async def get_query_detail(
-    fingerprint_id: str, session: DbSession
-) -> FingerprintDetailResponse:
+async def get_query_detail(fingerprint_id: str, session: DbSession) -> FingerprintDetailResponse:
     """Return the full detail for one fingerprint."""
     if not _FINGERPRINT_ID_RE.match(fingerprint_id):
         raise HTTPException(status_code=404, detail="not found")
@@ -196,9 +194,7 @@ async def _sse_generator(
 
 
 @router.get("/api/stream")
-async def stream_fingerprints(
-    request: Request, session: DbSession
-) -> StreamingResponse:
+async def stream_fingerprints(request: Request, session: DbSession) -> StreamingResponse:
     """SSE endpoint consumed by the Phase 4c dashboard's LiveTimeline."""
     return StreamingResponse(
         _sse_generator(request, session),
