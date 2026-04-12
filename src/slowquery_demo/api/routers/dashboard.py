@@ -57,25 +57,6 @@ def _extract_rule(suggestion_rationale: str, suggestion_source: str) -> str | No
     return None
 
 
-@router.get("/debug/db")
-async def debug_db(session: DbSession) -> dict[str, object]:
-    """Temporary debug endpoint — shows table row counts."""
-    from sqlalchemy import text
-
-    fp_count = (await session.execute(text("SELECT count(*) FROM query_fingerprints"))).scalar()
-    sample_count = (await session.execute(text("SELECT count(*) FROM query_samples"))).scalar()
-    plan_count = (await session.execute(text("SELECT count(*) FROM explain_plans"))).scalar()
-    sugg_count = (await session.execute(text("SELECT count(*) FROM suggestions"))).scalar()
-    user_count = (await session.execute(text("SELECT count(*) FROM users"))).scalar()
-    return {
-        "query_fingerprints": fp_count,
-        "query_samples": sample_count,
-        "explain_plans": plan_count,
-        "suggestions": sugg_count,
-        "users": user_count,
-    }
-
-
 @router.get("/queries")
 async def list_queries(session: DbSession) -> list[FingerprintResponse]:
     """Return all captured fingerprints sorted by total_ms desc."""
