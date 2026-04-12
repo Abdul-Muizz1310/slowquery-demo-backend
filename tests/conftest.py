@@ -80,6 +80,14 @@ def test_client(empty_session: AsyncMock) -> Iterator[TestClient]:
 
     app = create_app()
 
+    # Disable the real engine-builder so branch-switch tests don't
+    # try to connect to Neon. Unit tests only exercise the state
+    # transition + timing envelope; real engine rebuilds are
+    # integration-lane (spec 10).
+    switcher = getattr(app.state, "branch_switcher", None)
+    if switcher is not None:
+        switcher._engine_builder = None  # type: ignore[attr-defined]  # noqa: SLF001
+
     async def _override() -> AsyncGenerator[AsyncMock, None]:
         yield empty_session
 

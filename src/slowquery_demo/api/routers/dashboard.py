@@ -1,8 +1,10 @@
-"""Dashboard API at ``/_slowquery`` (spec 08).
+"""Dashboard API at ``/_slowquery`` (specs 08 + 09).
 
 Reads the bookkeeping tables populated by the drainer
 (``core/observability.py``) and returns the data the Phase 4c
-dashboard frontend needs.
+dashboard frontend needs. Also serves an SSE stream at ``/api/stream``
+(spec 09) that pushes ``tick`` / ``heartbeat`` / ``branch_switched``
+events to the dashboard's live timeline chart.
 
 Mounted at ``/_slowquery`` by :func:`install_slowquery` in
 ``core/observability.py``.
@@ -10,10 +12,15 @@ Mounted at ``/_slowquery`` by :func:`install_slowquery` in
 
 from __future__ import annotations
 
+import asyncio
+import collections.abc
+import json
 import re
+from datetime import UTC
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from slowquery_demo.core.database import get_db
@@ -115,4 +122,90 @@ async def get_query_detail(
         recent_samples=[
             QuerySampleResponse.model_validate(s, from_attributes=True) for s in samples
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Spec 09 — SSE stream
+# ---------------------------------------------------------------------------
+
+_SSE_POLL_INTERVAL_S = 2.0
+
+
+async def _sse_generator(
+    request: Request,
+    session: AsyncSession,
+) -> collections.abc.AsyncGenerator[str, None]:
+    """Polling-backed SSE generator.
+
+    Emits ``tick`` events when a fingerprint's p95 changes, and
+    ``heartbeat`` events when nothing changed. Uses a single session
+    (resolved through ``get_db`` dependency injection so test overrides
+    apply) and re-queries the table on each poll tick.
+    """
+    from datetime import datetime
+
+    last_p95: dict[str, float | None] = {}
+
+    # Emit an initial batch immediately so the client gets data before
+    # the first poll interval elapses.
+    fps = await repo.list_fingerprints(session)
+    now_iso = datetime.now(UTC).isoformat()
+    if fps:
+        for fp in fps:
+            current = float(fp.p95_ms) if fp.p95_ms is not None else None
+            if current is not None:
+                event = {
+                    "kind": "tick",
+                    "fingerprint_id": fp.id,
+                    "p95_ms": current,
+                    "sampled_at": now_iso,
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+            last_p95[fp.id] = current
+    else:
+        heartbeat = {"kind": "heartbeat", "now": now_iso}
+        yield f"data: {json.dumps(heartbeat)}\n\n"
+
+    while True:
+        await asyncio.sleep(_SSE_POLL_INTERVAL_S)
+        if await request.is_disconnected():
+            return
+
+        fps = await repo.list_fingerprints(session)
+        now_iso = datetime.now(UTC).isoformat()
+        emitted = False
+
+        for fp in fps:
+            prev = last_p95.get(fp.id)
+            current = float(fp.p95_ms) if fp.p95_ms is not None else None
+            if current is not None and current != prev:
+                event = {
+                    "kind": "tick",
+                    "fingerprint_id": fp.id,
+                    "p95_ms": current,
+                    "sampled_at": now_iso,
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+                emitted = True
+            last_p95[fp.id] = current
+
+        if not emitted:
+            heartbeat = {"kind": "heartbeat", "now": now_iso}
+            yield f"data: {json.dumps(heartbeat)}\n\n"
+
+
+@router.get("/api/stream")
+async def stream_fingerprints(
+    request: Request, session: DbSession
+) -> StreamingResponse:
+    """SSE endpoint consumed by the Phase 4c dashboard's LiveTimeline."""
+    return StreamingResponse(
+        _sse_generator(request, session),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
