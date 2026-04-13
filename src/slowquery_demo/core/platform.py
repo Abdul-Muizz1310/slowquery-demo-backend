@@ -11,6 +11,7 @@ control plane:
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -20,10 +21,16 @@ from fastapi.responses import JSONResponse
 
 _Handler = Callable[[Request], Awaitable[Response]]
 
-_CORS_ORIGINS = [
+_PROD_ORIGINS = [
     "https://slowquery-dashboard-frontend.vercel.app",
-    "http://localhost:3000",
 ]
+
+
+def _get_cors_origins() -> list[str]:
+    origins = list(_PROD_ORIGINS)
+    if os.environ.get("APP_ENV", "development") != "production":
+        origins.append("http://localhost:3000")
+    return origins
 
 
 def install_platform_middleware(app: FastAPI, *, service_name: str) -> None:
@@ -31,7 +38,7 @@ def install_platform_middleware(app: FastAPI, *, service_name: str) -> None:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_CORS_ORIGINS,
+        allow_origins=_get_cors_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
