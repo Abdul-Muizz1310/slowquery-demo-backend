@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, String, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,7 +14,10 @@ from slowquery_demo.models.base import Base
 
 class Product(Base):
     __tablename__ = "products"
-    __table_args__ = (CheckConstraint("price_cents > 0", name="ck_products_price_cents_positive"),)
+    __table_args__ = (
+        UniqueConstraint("sku", name="uq_products_sku"),
+        CheckConstraint("price_cents > 0", name="ck_products_price_cents_positive"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     sku: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)

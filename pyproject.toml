@@ -61,3 +61,8 @@ markers = [
     "slow: slow end-to-end tests (CI-only, opt-in)",
     "integration: requires Testcontainers / real Postgres",
 ]
+
+[dependency-groups]
+dev = [
+    "numpy>=2.4.4",
+]

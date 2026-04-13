@@ -50,7 +50,8 @@ class ConfigError(DomainError):
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    """Install a single handler for :class:`DomainError` and subclasses."""
+    """Install handlers for :class:`DomainError` and database connectivity."""
+    from sqlalchemy.exc import OperationalError
 
     async def _handle_domain_error(_: Request, exc: Exception) -> JSONResponse:
         if not isinstance(exc, DomainError):  # pragma: no cover - defensive
@@ -60,4 +61,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"error": exc.error_code},
         )
 
+    async def _handle_db_unavailable(_: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "service_unavailable"},
+        )
+
     app.add_exception_handler(DomainError, _handle_domain_error)
+    app.add_exception_handler(OperationalError, _handle_db_unavailable)

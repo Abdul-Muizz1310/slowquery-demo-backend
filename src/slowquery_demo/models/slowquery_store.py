@@ -19,6 +19,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -88,7 +89,10 @@ class ExplainPlan(Base):
 
 class Suggestion(Base):
     __tablename__ = "suggestions"
-    __table_args__ = (Index("ix_suggestions_fingerprint_id", "fingerprint_id"),)
+    __table_args__ = (
+        Index("ix_suggestions_fingerprint_id", "fingerprint_id"),
+        UniqueConstraint("fingerprint_id", "kind", "sql", name="uq_suggestions_fp_kind_sql"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     fingerprint_id: Mapped[str] = mapped_column(

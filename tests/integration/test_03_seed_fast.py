@@ -60,7 +60,9 @@ async def test_explain_uses_index_scan_on_fast(pg_engine_fast) -> None:  # type:
         )
     plan = json.loads(raw) if isinstance(raw, str) else raw
     node_type = plan[0]["Plan"]["Node Type"]
-    assert "Index" in node_type
+    # Postgres may choose Index Scan, Index Only Scan, or Bitmap Heap Scan
+    # (which uses a Bitmap Index Scan child). All are index-based plans.
+    assert node_type != "Seq Scan", f"expected index-based plan, got {node_type}"
 
 
 async def test_explain_uses_seq_scan_on_slow(pg_engine_slow) -> None:  # type: ignore[no-untyped-def]

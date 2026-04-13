@@ -42,7 +42,7 @@ _STATEMENTS_UPSERT_FINGERPRINT = "INSERT INTO query_fingerprints (id, fingerprin
 _STATEMENTS_RECORD_SAMPLE = "INSERT INTO query_samples (fingerprint_id, duration_ms, rows) VALUES ($1, $2, $3)"  # fmt: skip
 _STATEMENTS_RECORD_SAMPLE_STATS = "WITH recent AS (SELECT duration_ms FROM query_samples WHERE fingerprint_id = $1 ORDER BY sampled_at DESC LIMIT $2) UPDATE query_fingerprints SET p50_ms = (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms) FROM recent), p95_ms = (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) FROM recent), p99_ms = (SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms) FROM recent), max_ms = (SELECT max(duration_ms) FROM recent), total_ms = total_ms + $3::bigint, last_seen = now() WHERE id = $1"  # fmt: skip
 _STATEMENTS_UPSERT_PLAN = "INSERT INTO explain_plans (fingerprint_id, plan_json, plan_text, cost, captured_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (fingerprint_id) DO UPDATE SET plan_json = EXCLUDED.plan_json, plan_text = EXCLUDED.plan_text, cost = EXCLUDED.cost, captured_at = now()"  # fmt: skip
-_STATEMENTS_INSERT_SUGGESTIONS = "INSERT INTO suggestions (fingerprint_id, kind, sql, source, rationale) SELECT $1, unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::text[]) ON CONFLICT DO NOTHING"  # fmt: skip
+_STATEMENTS_INSERT_SUGGESTIONS = "INSERT INTO suggestions (fingerprint_id, kind, sql, source, rationale) SELECT $1, unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::text[]) ON CONFLICT (fingerprint_id, kind, sql) DO NOTHING"  # fmt: skip
 
 _STATEMENTS: Final[dict[str, str]] = {
     "upsert_fingerprint": _STATEMENTS_UPSERT_FINGERPRINT,

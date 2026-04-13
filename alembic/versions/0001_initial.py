@@ -234,10 +234,14 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_suggestions_fingerprint_id", "suggestions", ["fingerprint_id"])
+    op.create_unique_constraint(
+        "uq_suggestions_fp_kind_sql", "suggestions", ["fingerprint_id", "kind", "sql"]
+    )
 
 
 def downgrade() -> None:
     # Drop in reverse dependency order so the enum type goes last.
+    op.drop_constraint("uq_suggestions_fp_kind_sql", "suggestions", type_="unique")
     op.drop_index("ix_suggestions_fingerprint_id", table_name="suggestions")
     op.drop_table("suggestions")
 

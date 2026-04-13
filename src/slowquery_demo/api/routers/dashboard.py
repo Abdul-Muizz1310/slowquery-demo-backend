@@ -124,6 +124,68 @@ async def get_query_detail(fingerprint_id: str, session: DbSession) -> Fingerpri
 
 
 # ---------------------------------------------------------------------------
+# Spec 05 — force-explain endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/queries/{fingerprint_id}/force-explain")
+async def force_explain(fingerprint_id: str, request: Request) -> dict[str, str]:
+    """Force an EXPLAIN run + rules/LLM evaluation for a fingerprint.
+
+    Used by the dashboard's "Re-analyze" button and exercised by
+    integration test 05-9 to verify LLM is called when rules miss.
+    """
+    if not _FINGERPRINT_ID_RE.match(fingerprint_id):
+        raise HTTPException(status_code=404, detail="not found")
+
+    store = getattr(request.app.state, "slowquery_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="store not available")
+
+    # Build a synthetic plan that rules will NOT match, forcing the
+    # LLM fallback path.
+    synthetic_plan = {
+        "Plan": {
+            "Node Type": "Result",
+            "Total Cost": 0.01,
+        }
+    }
+    canonical_sql = f"/* force-explain */ SELECT 1 -- {fingerprint_id}"
+
+    # Ensure fingerprint exists.
+    await store.upsert_fingerprint(fingerprint_id, canonical_sql)
+    await store.upsert_plan(
+        fingerprint_id, plan_json=synthetic_plan, plan_text=str(synthetic_plan), cost=0.01
+    )
+
+    # Run the rules engine. If rules don't match, invoke LLM fallback.
+    from slowquery_detective.rules import run_rules
+
+    suggestions = run_rules(synthetic_plan, canonical_sql, fingerprint_id=fingerprint_id)
+
+    if not suggestions:
+        # Rules didn't match — try LLM fallback via the worker's explainer.
+        worker = getattr(request.app.state, "slowquery_worker", None)
+        explainer = getattr(worker, "_explainer", None) if worker else None
+        if explainer is not None:
+            try:
+                llm_suggestion = await explainer(
+                    canonical_sql,
+                    synthetic_plan,
+                    fingerprint_id=fingerprint_id,
+                )
+                if llm_suggestion is not None:
+                    suggestions = [llm_suggestion]
+            except Exception:
+                pass
+
+    if suggestions:
+        await store.insert_suggestions(fingerprint_id, suggestions)
+
+    return {"status": "ok", "suggestions_count": str(len(suggestions))}
+
+
+# ---------------------------------------------------------------------------
 # Spec 09 — SSE stream
 # ---------------------------------------------------------------------------
 

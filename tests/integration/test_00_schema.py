@@ -35,12 +35,28 @@ async def test_alembic_upgrade_creates_every_table(pg_engine) -> None:  # type: 
     assert expected.issubset(set(tables))
 
 
-async def test_alembic_downgrade_drops_tables_and_enum(pg_engine) -> None:  # type: ignore[no-untyped-def]
+async def test_alembic_downgrade_drops_tables_and_enum(pg_engine, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Spec 00 test 9."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
     from sqlalchemy import inspect, text
 
+    project_root = str(Path(__file__).resolve().parents[2])
+    db_url = os.environ.get("DATABASE_URL", "")
+    env = {**os.environ, "DATABASE_URL": db_url}
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "base"],
+        check=True,
+        env=env,
+        capture_output=True,
+        cwd=project_root,
+    )
+
     async with pg_engine.connect() as conn:
-        # After downgrade (performed by fixture), no demo tables remain.
+        # After downgrade, no demo tables remain.
         tables = await conn.run_sync(lambda sync: inspect(sync).get_table_names())
         assert "orders" not in tables
         # The order_status enum type must also be gone.
@@ -65,10 +81,10 @@ async def test_autogenerate_reports_empty_diff(pg_engine) -> None:  # type: igno
 async def test_invalid_order_status_rejected(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 00 test 11."""
     from sqlalchemy import text
-    from sqlalchemy.exc import DataError
+    from sqlalchemy.exc import DBAPIError
 
     async with pg_engine.begin() as conn:
-        with pytest.raises(DataError):
+        with pytest.raises(DBAPIError, match="invalid input value for enum"):
             await conn.execute(
                 text(
                     "INSERT INTO orders (id, user_id, status, total_cents) "
@@ -141,8 +157,8 @@ async def test_products_price_cents_zero_rejected(pg_engine) -> None:  # type: i
 async def test_dropping_enum_with_referencing_rows_fails(pg_engine) -> None:  # type: ignore[no-untyped-def]
     """Spec 00 test 15: downgrade path must drop tables before the enum type."""
     from sqlalchemy import text
-    from sqlalchemy.exc import DatabaseError
+    from sqlalchemy.exc import DBAPIError
 
     async with pg_engine.begin() as conn:
-        with pytest.raises(DatabaseError):
+        with pytest.raises(DBAPIError, match="cannot drop type"):
             await conn.execute(text("DROP TYPE order_status"))

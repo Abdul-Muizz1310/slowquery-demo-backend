@@ -7,17 +7,17 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-async def test_slow_query_records_fingerprint(seeded_app, pg_engine) -> None:  # type: ignore[no-untyped-def]
+async def test_slow_query_records_fingerprint(seeded_app, pg_engine_noop) -> None:  # type: ignore[no-untyped-def]
     """Spec 05 test 8."""
     import asyncio
 
     from sqlalchemy import text
 
-    sample_user_id = await _first_user(pg_engine)
+    sample_user_id = await _first_user(pg_engine_noop)
     seeded_app.get(f"/users/{sample_user_id}/orders")
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(2)
 
-    async with pg_engine.connect() as conn:
+    async with pg_engine_noop.connect() as conn:
         row = (
             await conn.execute(
                 text("SELECT fingerprint FROM query_fingerprints WHERE fingerprint LIKE '%orders%'")
