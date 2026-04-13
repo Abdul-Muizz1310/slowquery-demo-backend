@@ -56,19 +56,37 @@ def _docker_is_available() -> bool:
         return False
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="Run integration tests (requires Docker)",
+    )
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Skip all integration tests when Docker is unreachable."""
+    """Skip integration tests unless explicitly requested via --run-integration or -m integration."""
     if not items:
         return
 
-    if _docker_is_available():
+    run_integration = config.getoption("--run-integration", default=False)
+    markexpr = str(config.getoption("-m", default=""))
+    explicitly_requested = run_integration or ("integration" in markexpr)
+
+    if explicitly_requested:
+        if not _docker_is_available():
+            skip_marker = pytest.mark.skip(reason="Docker daemon not available")
+            for item in items:
+                if "integration" in str(item.fspath):
+                    item.add_marker(skip_marker)
         return
 
     skip_marker = pytest.mark.skip(
-        reason="Docker daemon not available (integration tests require Testcontainers)"
+        reason="integration tests skipped by default (use --run-integration)"
     )
     for item in items:
         if "integration" in str(item.fspath):
