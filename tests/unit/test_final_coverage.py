@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
 
 # ── user_service.py:19 — happy path get_user ─────────────────────────────────
 
@@ -21,7 +18,7 @@ async def test_get_user_happy_path() -> None:
     fake_user.id = uuid.uuid4()
     fake_user.full_name = "Alice"
     fake_user.email = "alice@test.com"
-    fake_user.created_at = datetime.now(timezone.utc)
+    fake_user.created_at = datetime.now(UTC)
 
     session = AsyncMock()
 
@@ -46,7 +43,9 @@ async def test_store_writer_pool_success() -> None:
     writer._closed = False
 
     mock_pool = MagicMock()
-    with patch("slowquery_demo.services.store.asyncpg.create_pool", new=AsyncMock(return_value=mock_pool)):
+    with patch(
+        "slowquery_demo.services.store.asyncpg.create_pool", new=AsyncMock(return_value=mock_pool)
+    ):
         pool = await writer._ensure_pool()
     assert pool is mock_pool
 

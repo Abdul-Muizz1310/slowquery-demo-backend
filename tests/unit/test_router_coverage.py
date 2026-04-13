@@ -6,7 +6,7 @@ These exercise FastAPI endpoints with a mocked DB session dependency.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,7 +14,6 @@ from httpx import ASGITransport, AsyncClient
 
 from slowquery_demo.core.database import get_db
 from slowquery_demo.main import app
-from slowquery_demo.schemas.branches import SwitchBranchResponse
 from slowquery_demo.schemas.order import OrderDTO
 from slowquery_demo.schemas.pagination import PaginatedResponse
 from slowquery_demo.schemas.product import ProductDTO
@@ -64,8 +63,11 @@ async def test_get_product_endpoint(client) -> None:
     """Cover products.py:29."""
     pid = uuid.uuid4()
     fake_dto = ProductDTO(
-        id=pid, sku="SKU-1", name="Widget", price_cents=999,
-        created_at=datetime.now(timezone.utc),
+        id=pid,
+        sku="SKU-1",
+        name="Widget",
+        price_cents=999,
+        created_at=datetime.now(UTC),
     )
 
     with patch(
@@ -121,7 +123,7 @@ async def test_branches_switcher_missing_503(client) -> None:
 
 async def test_branches_switcher_wired(client) -> None:
     """Cover branches.py:18-19 — switcher exists, returns it."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     mock_switcher = MagicMock()
     mock_switcher.switch = AsyncMock(return_value=(now, 42))
     mock_switcher.active = "fast"

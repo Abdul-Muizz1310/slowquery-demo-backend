@@ -22,9 +22,7 @@ import asyncio
 import base64
 import contextlib
 import json
-import time
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,7 +32,6 @@ import pytest
 from slowquery_demo.core.errors import InvalidCursorError, UserNotFoundError
 from slowquery_demo.services.store import PostgresStoreWriter
 from slowquery_demo.services.store_errors import StoreWriterError
-
 
 # ---------------------------------------------------------------------------
 # schemas/pagination.py lines 52-53 — cursor that decodes to invalid JSON
@@ -139,7 +136,9 @@ async def test_insert_suggestions_reraises_store_error() -> None:
     pool, _ = _pool_that_raises_store_error()
     writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
     suggestions = [
-        Suggestion(kind="index", sql="CREATE INDEX ...", rationale="r", confidence=0.9, source="rules"),
+        Suggestion(
+            kind="index", sql="CREATE INDEX ...", rationale="r", confidence=0.9, source="rules"
+        ),
     ]
     with pytest.raises(StoreWriterError, match="already a store error"):
         await writer.insert_suggestions("abc", suggestions)
@@ -330,7 +329,6 @@ def test_after_cursor_execute_skips_when_no_start() -> None:
 def test_after_cursor_execute_records_and_bridges() -> None:
     """_after fingerprints, records to buffer, and puts on bridge queue."""
     from slowquery_demo.core.observability import (
-        _CONTEXT_START_ATTR,
         _make_patched_attach,
     )
 
@@ -363,7 +361,6 @@ def test_after_cursor_execute_records_and_bridges() -> None:
 def test_after_cursor_execute_handles_fingerprint_error() -> None:
     """_after returns early when fingerprint_fn raises."""
     from slowquery_demo.core.observability import (
-        _CONTEXT_START_ATTR,
         _make_patched_attach,
     )
 
@@ -395,7 +392,6 @@ def test_after_cursor_execute_handles_fingerprint_error() -> None:
 def test_after_cursor_execute_handles_buffer_record_error() -> None:
     """_after continues even when buffer.record raises."""
     from slowquery_demo.core.observability import (
-        _CONTEXT_START_ATTR,
         _make_patched_attach,
     )
 
@@ -429,7 +425,6 @@ def test_after_cursor_execute_handles_buffer_record_error() -> None:
 def test_after_cursor_execute_no_loop() -> None:
     """_after returns early when loop_ref is None."""
     from slowquery_demo.core.observability import (
-        _CONTEXT_START_ATTR,
         _make_patched_attach,
     )
 
@@ -859,7 +854,11 @@ async def test_drainer_rules_failure_continues() -> None:
     await _run_drainer_with_items(
         app,
         [("fp2", "SELECT 1", "SELECT 1", (), 500.0)],
-        extra_patches={"slowquery_demo.core.observability.run_rules": MagicMock(side_effect=RuntimeError("rules fail"))},
+        extra_patches={
+            "slowquery_demo.core.observability.run_rules": MagicMock(
+                side_effect=RuntimeError("rules fail")
+            )
+        },
     )
 
     store.upsert_plan.assert_awaited_once()
@@ -905,11 +904,15 @@ async def test_drainer_insert_suggestions_failure_continues() -> None:
     app.state.slowquery_store = store
     app.state.slowquery_threshold_ms = 10
 
-    suggestion = Suggestion(kind="index", sql="CREATE INDEX ...", rationale="r", confidence=0.9, source="rules")
+    suggestion = Suggestion(
+        kind="index", sql="CREATE INDEX ...", rationale="r", confidence=0.9, source="rules"
+    )
     await _run_drainer_with_items(
         app,
         [("fp4", "SELECT 1", "SELECT 1", (), 500.0)],
-        extra_patches={"slowquery_demo.core.observability.run_rules": MagicMock(return_value=[suggestion])},
+        extra_patches={
+            "slowquery_demo.core.observability.run_rules": MagicMock(return_value=[suggestion])
+        },
     )
 
     store.insert_suggestions.assert_awaited_once()
@@ -1138,6 +1141,7 @@ async def test_sse_generator_poll_loop_tick_and_heartbeat() -> None:
     fp3.p95_ms = 20.0  # unchanged
 
     call_count = [0]
+
     async def mock_list_fingerprints(session: Any) -> list[Any]:
         call_count[0] += 1
         if call_count[0] == 1:
@@ -1149,6 +1153,7 @@ async def test_sse_generator_poll_loop_tick_and_heartbeat() -> None:
 
     request = MagicMock()
     disconnect_count = [0]
+
     async def mock_is_disconnected() -> bool:
         disconnect_count[0] += 1
         return disconnect_count[0] > 2
@@ -1264,10 +1269,19 @@ def test_get_query_detail_found(test_client: Any) -> None:
     sample = _make_sample_mock()
 
     with (
-        patch.object(dash_mod.repo, "get_fingerprint_by_id", new_callable=AsyncMock, return_value=fp),
-        patch.object(dash_mod.repo, "list_suggestions_for_fingerprint", new_callable=AsyncMock, return_value=[suggestion]),
+        patch.object(
+            dash_mod.repo, "get_fingerprint_by_id", new_callable=AsyncMock, return_value=fp
+        ),
+        patch.object(
+            dash_mod.repo,
+            "list_suggestions_for_fingerprint",
+            new_callable=AsyncMock,
+            return_value=[suggestion],
+        ),
         patch.object(dash_mod.repo, "get_explain_plan", new_callable=AsyncMock, return_value=plan),
-        patch.object(dash_mod.repo, "list_recent_samples", new_callable=AsyncMock, return_value=[sample]),
+        patch.object(
+            dash_mod.repo, "list_recent_samples", new_callable=AsyncMock, return_value=[sample]
+        ),
     ):
         resp = test_client.get("/_slowquery/queries/abc1234567890123")
 
@@ -1287,8 +1301,15 @@ def test_get_query_detail_no_plan(test_client: Any) -> None:
     fp = _make_fp_mock()
 
     with (
-        patch.object(dash_mod.repo, "get_fingerprint_by_id", new_callable=AsyncMock, return_value=fp),
-        patch.object(dash_mod.repo, "list_suggestions_for_fingerprint", new_callable=AsyncMock, return_value=[]),
+        patch.object(
+            dash_mod.repo, "get_fingerprint_by_id", new_callable=AsyncMock, return_value=fp
+        ),
+        patch.object(
+            dash_mod.repo,
+            "list_suggestions_for_fingerprint",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
         patch.object(dash_mod.repo, "get_explain_plan", new_callable=AsyncMock, return_value=None),
         patch.object(dash_mod.repo, "list_recent_samples", new_callable=AsyncMock, return_value=[]),
     ):
@@ -1576,6 +1597,7 @@ def test_version_endpoint(test_client: Any) -> None:
 def test_sse_stream_endpoint_returns_event_stream(test_client: Any) -> None:
     """The /api/stream endpoint returns text/event-stream content type."""
     with patch("slowquery_demo.api.routers.dashboard._sse_generator") as mock_gen:
+
         async def fake_gen(request: Any, session: Any) -> AsyncGenerator[str, None]:
             yield 'data: {"kind": "heartbeat"}\n\n'
 

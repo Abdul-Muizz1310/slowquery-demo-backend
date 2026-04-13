@@ -77,7 +77,19 @@ async def test_rerun_without_reset_refuses(pg_engine) -> None:  # type: ignore[n
     # First seed to populate the tables.
     await asyncio.to_thread(
         lambda: asyncio.run(
-            main(["--reset", "--users", "10", "--orders", "10", "--order-items", "50", "--products", "5"])
+            main(
+                [
+                    "--reset",
+                    "--users",
+                    "10",
+                    "--orders",
+                    "10",
+                    "--order-items",
+                    "50",
+                    "--products",
+                    "5",
+                ]
+            )
         )
     )
 

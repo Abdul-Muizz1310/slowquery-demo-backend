@@ -12,7 +12,6 @@ import pytest
 
 from slowquery_demo.core.errors import OrderNotFoundError, ProductNotFoundError
 
-
 # ---------------------------------------------------------------------------
 # order_service
 # ---------------------------------------------------------------------------

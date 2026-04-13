@@ -125,7 +125,9 @@ async def test_rule_fires_on_slow_branch(seeded_app_slow, pg_engine_noop) -> Non
         if suggestions and suggestions >= 1:
             break
     # At minimum, the drainer must have recorded the fingerprint.
-    assert fingerprints >= 1, f"fingerprints={fingerprints}, suggestions={suggestions}, plans={explain_plans}"
+    assert fingerprints >= 1, (
+        f"fingerprints={fingerprints}, suggestions={suggestions}, plans={explain_plans}"
+    )
     # Suggestions require the full EXPLAIN→rules pipeline. With a small
     # dataset the query may be too fast for a Seq Scan to fire rules.
     # We accept either suggestions from rules or at least an EXPLAIN plan.

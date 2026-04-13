@@ -72,12 +72,13 @@ async def test_fingerprints_recorded_after_switch(dual_pg_app, pg_engine_noop) -
 
     # The buffer lives in app.state.slowquery_buffer and records synchronously
     # in the hook callback. Check it directly rather than the async DB drain.
-    from starlette.testclient import TestClient
 
     app = dual_pg_app.app  # type: ignore[attr-defined]
     buffer = getattr(app.state, "slowquery_buffer", None)
     if buffer is not None:
-        assert len(buffer._samples) > 0, "Expected buffer to have recorded fingerprints after switch"
+        assert len(buffer._samples) > 0, (
+            "Expected buffer to have recorded fingerprints after switch"
+        )
     else:
         # If middleware isn't installed, the test still passes —
         # the branch switch itself is covered by other tests.

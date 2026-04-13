@@ -6,8 +6,6 @@ The actual API endpoint tests use the test_client fixture from conftest.
 
 from __future__ import annotations
 
-import re
-
 
 def test_extract_rule_returns_none_for_non_rules_source() -> None:
     from slowquery_demo.api.routers.dashboard import _extract_rule

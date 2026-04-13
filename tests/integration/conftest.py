@@ -86,7 +86,9 @@ def _asyncpg_url(sync_url: str) -> str:
     raise RuntimeError(f"unexpected Postgres URL shape: {sync_url!r}")
 
 
-def _run_alembic(cmd: list[str], env: dict[str, str], *, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+def _run_alembic(
+    cmd: list[str], env: dict[str, str], *, check: bool = True
+) -> subprocess.CompletedProcess[bytes]:
     """Run an alembic command as a subprocess from the project root."""
     return subprocess.run(
         [sys.executable, "-m", "alembic", *cmd],
@@ -111,7 +113,8 @@ def _seed_slow(async_url: str) -> None:
     env = {**os.environ, "DATABASE_URL": async_url}
     result = subprocess.run(
         [
-            sys.executable, "-c",
+            sys.executable,
+            "-c",
             "import asyncio; from scripts.seed_slow import main; "
             f"asyncio.run(main(['--reset', '--users', '{_SEED_USERS}', "
             f"'--orders', '{_SEED_ORDERS}', '--order-items', '{_SEED_ORDER_ITEMS}', "
@@ -130,7 +133,8 @@ def _seed_fast(async_url: str) -> None:
     env = {**os.environ, "DATABASE_URL_FAST": async_url}
     result = subprocess.run(
         [
-            sys.executable, "-c",
+            sys.executable,
+            "-c",
             "import asyncio; from scripts.seed_fast import main; "
             f"asyncio.run(main(['--reset', '--users', '{_SEED_USERS}', "
             f"'--orders', '{_SEED_ORDERS}', '--order-items', '{_SEED_ORDER_ITEMS}', "
@@ -668,10 +672,14 @@ def _start_uvicorn_server(
 
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "uvicorn",
+            sys.executable,
+            "-m",
+            "uvicorn",
             "slowquery_demo.main:app",
-            "--host", "127.0.0.1",
-            "--port", str(port),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
         ],
         env=env,
         cwd=_PROJECT_ROOT,
