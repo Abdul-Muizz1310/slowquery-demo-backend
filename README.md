@@ -9,7 +9,7 @@
 ![fastapi](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![sqlalchemy](https://img.shields.io/badge/SQLAlchemy-2.0%20async-d71f00?style=flat-square)
 ![neon](https://img.shields.io/badge/Neon-Postgres-00e599?style=flat-square&logo=postgresql&logoColor=white)
-![tests](https://img.shields.io/badge/tests-114%20(73u%20+%2041i)-6e9f18?style=flat-square)
+![tests](https://img.shields.io/badge/tests-262%20(213u%20+%2049i)-6e9f18?style=flat-square)
 ![mypy](https://img.shields.io/badge/mypy-strict-blue?style=flat-square)
 [![ci](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
@@ -53,7 +53,7 @@ The demo's punchline: switch from the `slowquery` branch (no indexes, seq scans)
 - 📡 SSE stream for live p95 updates to the frontend
 - 🔀 Branch switch endpoint — swap slow ↔ fast in one POST
 - 🚦 Traffic generator script for burst testing
-- 🧪 73 unit + 41 integration tests (Testcontainers)
+- 🧪 213 unit + 49 integration tests (Testcontainers), 100% line coverage
 - 🛡️ Pydantic v2 schemas, `Literal` types, frozen DTOs
 - 🚀 Render free tier with auto-deploy via CI webhook
 
@@ -164,7 +164,7 @@ src/slowquery_demo/
 | **Middleware** | [`slowquery-detective`](https://pypi.org/project/slowquery-detective/) v0.1.0 (with 4 in-repo compatibility shims) |
 | **Database** | Neon serverless Postgres, two branches (`slowquery` / `slowquery-fast`) |
 | **Migrations** | Alembic async env, one migration (`0001_initial.py`) — full 8-table schema |
-| **Tests** | pytest + pytest-asyncio, 73 unit + 41 integration (Testcontainers) |
+| **Tests** | pytest + pytest-asyncio, 213 unit + 49 integration (Testcontainers), 100% coverage |
 | **Lint / Types** | ruff + mypy `--strict` on `src/` |
 | **Hosting** | Render Free tier, auto-deploy via deploy-hook webhook from CI |
 | **CI** | GitHub Actions: lint → test → build → deploy |
@@ -213,8 +213,9 @@ uv run pytest --cov=src/slowquery_demo --cov-report=term-missing
 
 | Metric | Value |
 |---|---|
-| **Unit tests** | 73 |
-| **Integration tests** | 41 (Testcontainers) |
+| **Unit tests** | 213 |
+| **Integration tests** | 49 (Testcontainers) |
+| **Line coverage** | **100%** |
 | **Methodology** | Red-first spec-TDD. Every spec in `docs/specs/` with enumerated test cases before code ships. |
 
 ---
