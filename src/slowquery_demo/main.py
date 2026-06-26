@@ -27,6 +27,7 @@ from slowquery_demo.core.database import build_engine
 from slowquery_demo.core.errors import register_exception_handlers
 from slowquery_demo.core.observability import install_slowquery, slowquery_lifespan
 from slowquery_demo.core.platform import install_platform_middleware
+from slowquery_demo.core.platform_token import install_platform_token
 from slowquery_demo.services.branch_switcher import BranchSwitcher
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="slowquery_demo", version="0.1.0", lifespan=slowquery_lifespan)
     install_platform_middleware(app, service_name="slowquery_demo")
+    install_platform_token(app, demo_mode=settings.demo_mode)
     register_exception_handlers(app)
 
     app.state.settings = settings
