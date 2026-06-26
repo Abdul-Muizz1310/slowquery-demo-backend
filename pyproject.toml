@@ -60,6 +60,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=80"
 markers = [
     "slow: slow end-to-end tests (CI-only, opt-in)",
     "integration: requires Testcontainers / real Postgres",
