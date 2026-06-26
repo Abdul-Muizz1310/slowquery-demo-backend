@@ -79,3 +79,66 @@ def test_response_shape(test_client) -> None:  # type: ignore[no-untyped-def]
     body = resp.json()
     assert isinstance(body["latency_ms"], int) and body["latency_ms"] > 0
     dt.datetime.fromisoformat(body["switched_at"])
+
+
+@pytest.mark.asyncio
+async def test_buffer_cleared_after_successful_switch() -> None:
+    """Spec 06 test 5: the buffer on app.state is cleared after a switch.
+
+    Wires the real ``BranchSwitcher`` from ``create_app`` with a fake
+    engine_builder (so no Neon is dialed) and the real ``post_switch``
+    hook. A sample is recorded into the buffer before the switch and the
+    buffer must be empty afterward.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    buffer = app.state.slowquery_buffer
+    buffer.record("c168fc78", 1200.0)
+    assert "c168fc78" in buffer.keys()  # noqa: SIM118 — RingBuffer.keys() returns a frozenset
+
+    # Replace the engine_builder with a fake that swaps in a new engine,
+    # mirroring what the production closure does, but without Neon.
+    switcher = app.state.branch_switcher
+
+    async def _fake_builder(url: str) -> tuple[object, object]:
+        app.state.engine = MagicMock(name="rebuilt_engine")
+        app.state.db_sessionmaker = MagicMock(name="rebuilt_factory")
+        return app.state.engine, app.state.db_sessionmaker
+
+    switcher._engine_builder = _fake_builder  # type: ignore[attr-defined]
+
+    # Re-attach is exercised separately; stub it so this test isolates
+    # the buffer-clear invariant.
+    with patch(
+        "slowquery_demo.core.observability.reattach_slowquery",
+        new=MagicMock(return_value=True),
+    ):
+        await switcher.switch("fast")
+
+    assert buffer.keys() == frozenset()
+    assert switcher.active == "fast"
+
+
+def test_engine_builder_failure_leaves_buffer_intact() -> None:
+    """A failed switch must not clear the buffer (old branch stays live)."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    buffer = app.state.slowquery_buffer
+    buffer.record("c168fc78", 1200.0)
+
+    switcher = app.state.branch_switcher
+    failing = AsyncMock(side_effect=ConnectionError("neon down"))
+    switcher._engine_builder = failing  # type: ignore[attr-defined]
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(switcher.switch("fast"))
+
+    assert "c168fc78" in buffer.keys()  # noqa: SIM118 — RingBuffer.keys() returns a frozenset
+    assert switcher.active == "slow"

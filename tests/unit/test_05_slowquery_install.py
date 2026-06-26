@@ -138,3 +138,60 @@ def test_no_outbound_openrouter_when_llm_disabled(test_client, respx_mock) -> No
     )
     test_client.get("/users?limit=5")
     assert not openrouter.called
+
+
+# --- Branch-switch side effects (spec 06 invariant 5) -------------------
+
+
+@pytest.mark.asyncio
+async def test_on_branch_switch_clears_buffer() -> None:
+    """Spec 06 invariant 5: the rolling buffer is cleared on switch.
+
+    Old-branch percentiles would otherwise pollute the new branch's
+    fresh stats and the dashboard p95 would not visibly drop.
+    """
+    from slowquery_demo.core.observability import on_branch_switch
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    buffer = app.state.slowquery_buffer
+    buffer.record("deadbeef", 1200.0)
+    assert "deadbeef" in buffer.keys()  # noqa: SIM118 — RingBuffer.keys() returns a frozenset
+
+    await on_branch_switch(app)
+
+    assert buffer.keys() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_on_branch_switch_reattaches_hooks_to_new_engine() -> None:
+    """F: hooks re-attach to the swapped engine so new samples flow.
+
+    Simulate a swap by replacing ``app.state.engine`` with a fresh
+    engine, then assert the patched ``attach`` is invoked against it.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from slowquery_demo.core.observability import on_branch_switch
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    new_engine = MagicMock(name="new_engine")
+    app.state.engine = new_engine
+
+    with patch("slowquery_demo.core.observability._patched_attach") as mock_attach:
+        await on_branch_switch(app)
+
+    mock_attach.assert_called_once()
+    called_engine = mock_attach.call_args.args[0]
+    assert called_engine is new_engine
+
+
+def test_reattach_slowquery_noop_when_not_installed() -> None:
+    """``reattach_slowquery`` is a safe no-op if the pipeline is absent."""
+    from fastapi import FastAPI
+
+    from slowquery_demo.core.observability import reattach_slowquery
+
+    app = FastAPI()
+    assert reattach_slowquery(app) is False

@@ -381,6 +381,53 @@ async def _run_direct_explain(
 _INSTALLED_ATTR = "_slowquery_installed"
 
 
+def reattach_slowquery(app: FastAPI) -> bool:
+    """Attach the slowquery hooks to the engine currently on ``app.state``.
+
+    The library's ``attach`` (and our patched replacement) stamps
+    ``_slowquery_attached`` on the *sync* engine and short-circuits if it
+    is already set. A branch switch builds a brand-new ``AsyncEngine``
+    whose sync engine has no such stamp, so the listeners installed at
+    startup do not follow the swap — new queries on the new engine emit
+    no samples. Calling this after the swap installs fresh listeners on
+    the new engine so observability resumes within one request.
+
+    Returns ``True`` if listeners were attached, ``False`` if the
+    pipeline is not installed or the buffer/engine is missing (in which
+    case there is nothing to re-attach).
+    """
+    if not getattr(app.state, _INSTALLED_ATTR, False):
+        return False
+    buffer = getattr(app.state, "slowquery_buffer", None)
+    engine = getattr(app.state, "engine", None)
+    if buffer is None or engine is None:
+        return False
+    settings = getattr(app.state, "settings", None)
+    sample_rate = getattr(settings, "slowquery_sample_rate", 1.0)
+    _patched_attach(engine, buffer, sample_rate=sample_rate)
+    return True
+
+
+async def on_branch_switch(app: FastAPI) -> None:
+    """Side effects the branch switcher runs after a successful swap.
+
+    Two responsibilities, both keyed off the engine that ``main.py``
+    has already swapped onto ``app.state``:
+
+    1. **Clear the rolling buffer** (spec 06 invariant 5). Percentiles
+       computed from the old branch would otherwise pollute the new
+       branch's fresh stats — the dashboard's p95 line would not visibly
+       drop after switching to the indexed branch.
+    2. **Re-attach the hooks** to the swapped engine so new samples flow
+       on the new branch (the startup listeners stay bound to the old,
+       now-disposed engine).
+    """
+    buffer = getattr(app.state, "slowquery_buffer", None)
+    if buffer is not None and hasattr(buffer, "clear"):
+        buffer.clear()
+    reattach_slowquery(app)
+
+
 def install_slowquery(
     app: FastAPI,
     engine: Any,

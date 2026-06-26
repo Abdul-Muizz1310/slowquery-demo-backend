@@ -107,3 +107,61 @@ def test_make_engine_builder_is_callable() -> None:
     app = MagicMock()
     builder = _make_engine_builder(app)
     assert callable(builder)
+
+
+@pytest.mark.asyncio
+async def test_post_switch_runs_after_successful_engine_rebuild(
+    mock_engine_builder: AsyncMock,
+) -> None:
+    """Spec 06 invariant 5: the post-switch hook fires after the swap.
+
+    The hook runs after ``engine_builder`` returns (the new engine is on
+    ``app.state``) and before the switch returns.
+    """
+    post_switch = AsyncMock()
+    switcher = BranchSwitcher(
+        initial="slow",
+        slow_url="postgresql://slow",
+        fast_url="postgresql://fast",
+        engine_builder=mock_engine_builder,
+        post_switch=post_switch,
+    )
+    await switcher.switch("fast")
+    post_switch.assert_awaited_once_with()
+    # Ordering: the engine must have been rebuilt before the hook ran.
+    mock_engine_builder.assert_awaited_once_with("postgresql://fast")
+
+
+@pytest.mark.asyncio
+async def test_post_switch_skipped_when_no_engine_builder() -> None:
+    """A state-only switch records no new samples, so no hook runs."""
+    post_switch = AsyncMock()
+    switcher = BranchSwitcher(
+        initial="slow",
+        slow_url="postgresql://slow",
+        fast_url="postgresql://fast",
+        engine_builder=None,
+        post_switch=post_switch,
+    )
+    await switcher.switch("fast")
+    post_switch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_switch_skipped_when_engine_rebuild_fails(
+    mock_engine_builder: AsyncMock,
+) -> None:
+    """If the rebuild raises, the active branch and buffer stay untouched."""
+    mock_engine_builder.side_effect = ConnectionError("neon is down")
+    post_switch = AsyncMock()
+    switcher = BranchSwitcher(
+        initial="slow",
+        slow_url="postgresql://slow",
+        fast_url="postgresql://fast",
+        engine_builder=mock_engine_builder,
+        post_switch=post_switch,
+    )
+    with pytest.raises(ConnectionError):
+        await switcher.switch("fast")
+    post_switch.assert_not_awaited()
+    assert switcher.active == "slow"

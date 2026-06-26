@@ -25,7 +25,11 @@ from slowquery_demo.core.branch_state import load_branch
 from slowquery_demo.core.config import Settings
 from slowquery_demo.core.database import build_engine
 from slowquery_demo.core.errors import register_exception_handlers
-from slowquery_demo.core.observability import install_slowquery, slowquery_lifespan
+from slowquery_demo.core.observability import (
+    install_slowquery,
+    on_branch_switch,
+    slowquery_lifespan,
+)
 from slowquery_demo.core.platform import install_platform_middleware
 from slowquery_demo.core.platform_token import install_platform_token
 from slowquery_demo.services.branch_switcher import BranchSwitcher
@@ -82,6 +86,22 @@ def _make_engine_builder(app: FastAPI) -> Any:
     return _rebuild
 
 
+def _make_post_switch(app: FastAPI) -> Any:
+    """Return the async hook the BranchSwitcher runs after a swap.
+
+    Delegates to :func:`on_branch_switch`, which clears the rolling
+    buffer (spec 06 invariant 5) and re-attaches the observability hooks
+    to the engine that ``_make_engine_builder`` has already swapped onto
+    ``app.state``. Reads ``app.state`` lazily at call time so it works
+    even though ``install_slowquery`` runs after the switcher is wired.
+    """
+
+    async def _post_switch() -> None:
+        await on_branch_switch(app)
+
+    return _post_switch
+
+
 def create_app() -> FastAPI:
     settings = Settings()
     engine, session_factory = build_engine(settings.database_url)
@@ -100,6 +120,7 @@ def create_app() -> FastAPI:
         slow_url=settings.database_url,
         fast_url=settings.database_url_fast,
         engine_builder=_make_engine_builder(app),
+        post_switch=_make_post_switch(app),
     )
 
     install_slowquery(app, engine, settings)

@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 # failure so the switch aborts cleanly.
 EngineBuilder = Callable[[str], Awaitable[tuple[Any, Any]]]
 
+# Type for the post-switch hook. It runs after a successful engine swap
+# and performs app-state side effects (clear the rolling buffer, re-
+# attach the observability hooks to the new engine). It owns no HTTP or
+# FastAPI concepts of its own — ``main.py`` injects a closure over the
+# app so this service stays free of framework imports.
+PostSwitch = Callable[[], Awaitable[None]]
+
 
 class BranchSwitcher:
     """Owns the currently-active branch and the switch lock."""
@@ -37,11 +44,13 @@ class BranchSwitcher:
         slow_url: str,
         fast_url: str,
         engine_builder: EngineBuilder | None = None,
+        post_switch: PostSwitch | None = None,
     ) -> None:
         self._active: BranchName = initial
         self._slow_url = slow_url
         self._fast_url = fast_url
         self._engine_builder = engine_builder
+        self._post_switch = post_switch
         self._lock = asyncio.Lock()
 
     @property
@@ -61,6 +70,12 @@ class BranchSwitcher:
         checks it, and atomically swaps ``app.state.engine`` +
         ``app.state.db_sessionmaker``. The old engine is disposed
         asynchronously with a 5-second grace window.
+
+        After a successful swap the ``post_switch`` hook (if provided)
+        runs to clear the rolling buffer and re-attach the observability
+        hooks to the new engine (spec 06 invariant 5). It runs only when
+        the engine was actually rebuilt — a state-only switch (no
+        ``engine_builder``) records no new samples to invalidate.
         """
         async with self._lock:
             if target == self._active:
@@ -70,6 +85,8 @@ class BranchSwitcher:
                 url = self._slow_url if target == "slow" else self._fast_url
                 await self._engine_builder(url)
                 logger.info("engine rebuilt for branch=%s", target)
+                if self._post_switch is not None:
+                    await self._post_switch()
             self._active = target
             save_branch(target)
             latency_ms = max(1, int((time.monotonic() - start) * 1000))
