@@ -1,10 +1,13 @@
-"""Seed the ``slowquery-fast`` Neon branch with the same rows + 3 indexes.
+"""Seed the ``slowquery-fast`` Neon branch with the same rows + indexes.
 
 Row generation is delegated to ``scripts/_seed_common`` so this script
-and ``seed_slow.py`` cannot drift. The three missing indexes on the
-slow branch are materialized here out of the ``FAST_INDEXES`` constant
-(Spec 03 invariant 3). ``--reset`` truncates and re-inserts; without
-``--reset`` on a non-empty database the script is a no-op.
+and ``seed_slow.py`` cannot drift. The indexes the slow branch
+deliberately omits are materialized here out of the ``FAST_INDEXES``
+constant (Spec 03 invariant 3): one on ``orders(user_id)`` for the
+``WHERE user_id = ?`` path, one on ``orders(created_at)`` for the
+``ORDER BY created_at DESC`` path, and two on ``order_items`` foreign
+keys. ``--reset`` truncates and re-inserts; without ``--reset`` on a
+non-empty database the script is a no-op.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from scripts._seed_common import (
 
 FAST_INDEXES: Final[tuple[str, ...]] = (
     "CREATE INDEX IF NOT EXISTS ix_orders_user_id ON orders(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_orders_created_at ON orders(created_at)",
     "CREATE INDEX IF NOT EXISTS ix_order_items_order_id ON order_items(order_id)",
     "CREATE INDEX IF NOT EXISTS ix_order_items_product_id ON order_items(product_id)",
 )

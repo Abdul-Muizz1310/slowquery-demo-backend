@@ -43,7 +43,7 @@ Four router files under `src/slowquery_demo/api/routers/`, one per commerce mode
 **Success (integration — `@pytest.mark.integration` against a small seeded db):**
 8. Hitting `GET /users/{id}/orders` through a `TestClient` with the slowquery-detective middleware attached results in exactly one fingerprint being recorded in `query_fingerprints` matching the parameterized SQL.
 9. On a seeded db large enough that `EXPLAIN` returns a seq scan (e.g. 10k orders), hitting `GET /users/{id}/orders` once triggers the `seq_scan_large_table` rule — a suggestion row appears in the `suggestions` table within 5 seconds.
-10. On the `slowquery-fast` DB (3 indexes present), the same request does **not** trigger the rule — proof the endpoint's slowness is a function of schema, not query.
+10. On the `slowquery-fast` DB (4 indexes present), the same request does **not** trigger the rule — proof the endpoint's slowness is a function of schema, not query.
 
 **Failure / negative:**
 11. `GET /users/{id}` with a malformed UUID returns 422 (FastAPI validation) not 500.

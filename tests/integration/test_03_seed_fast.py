@@ -24,13 +24,14 @@ async def test_row_identity_between_slow_and_fast(pg_engine_slow, pg_engine_fast
     assert slow_users == fast_users
 
 
-async def test_fast_branch_has_three_indexes(pg_engine_fast) -> None:  # type: ignore[no-untyped-def]
+async def test_fast_branch_has_all_indexes(pg_engine_fast) -> None:  # type: ignore[no-untyped-def]
     """Spec 03 test 5."""
     from sqlalchemy import text
 
     async with pg_engine_fast.connect() as conn:
         names = {r[0] for r in (await conn.execute(text("SELECT indexname FROM pg_indexes"))).all()}
     assert "ix_orders_user_id" in names
+    assert "ix_orders_created_at" in names
     assert "ix_order_items_order_id" in names
     assert "ix_order_items_product_id" in names
 
@@ -42,6 +43,7 @@ async def test_slow_branch_still_missing_indexes(pg_engine_slow) -> None:  # typ
     async with pg_engine_slow.connect() as conn:
         names = {r[0] for r in (await conn.execute(text("SELECT indexname FROM pg_indexes"))).all()}
     assert "ix_orders_user_id" not in names
+    assert "ix_orders_created_at" not in names
     assert "ix_order_items_order_id" not in names
     assert "ix_order_items_product_id" not in names
 

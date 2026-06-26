@@ -32,14 +32,21 @@ def test_parse_args_matches_seed_slow_shape() -> None:
     assert a.order_items == b.order_items
 
 
-def test_fast_indexes_constant_enumerates_three_indexes() -> None:
-    """Spec 03 test 3."""
+def test_fast_indexes_constant_enumerates_four_indexes() -> None:
+    """Spec 03 test 3.
+
+    Four indexes ship on the fast branch. ``orders(created_at)`` backs
+    the headlined ``GET /orders`` (``ORDER BY created_at DESC``) query;
+    ``orders(user_id)`` backs ``GET /users/{id}/orders``; the two
+    ``order_items`` foreign-key indexes back the join paths.
+    """
     from scripts.seed_fast import FAST_INDEXES
 
     assert isinstance(FAST_INDEXES, tuple)
-    assert len(FAST_INDEXES) == 3
+    assert len(FAST_INDEXES) == 4
     joined = " ".join(FAST_INDEXES)
     assert "orders(user_id)" in joined
+    assert "orders(created_at)" in joined
     assert "order_items(order_id)" in joined
     assert "order_items(product_id)" in joined
 
@@ -84,8 +91,8 @@ def test_create_index_appears_only_in_fast_indexes_constant() -> None:
 
     body = SEED_FAST.read_text(encoding="utf-8")
     total = len(re.findall(r"CREATE\s+INDEX", body, re.IGNORECASE))
-    assert total == len(FAST_INDEXES) == 3, (
-        f"expected 3 CREATE INDEX statements, found {total} in file, "
+    assert total == len(FAST_INDEXES) == 4, (
+        f"expected 4 CREATE INDEX statements, found {total} in file, "
         f"{len(FAST_INDEXES)} in FAST_INDEXES"
     )
     for sql in FAST_INDEXES:
