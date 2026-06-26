@@ -40,14 +40,14 @@ Phase 4b of the [slowquery-detective](https://pypi.org/project/slowquery-detecti
 
 This backend is that target: a seeded commerce database with intentionally missing indexes, wired to the middleware, producing real fingerprints, EXPLAIN plans, and rule-engine suggestions that the [dashboard frontend](https://github.com/Abdul-Muizz1310/slowquery-dashboard-frontend) visualizes.
 
-The demo's punchline: switch from the `slowquery` branch (no indexes, seq scans) to `slowquery-fast` (3 indexes) and watch p95 drop from **1200ms to 18ms**.
+The demo's punchline: switch from the `slowquery` branch (no indexes, seq scans) to `slowquery-fast` (indexed) and the seq-scan / sort queries become index scans. The size of the p95 drop is **seed-dependent** — the full 1M-order seed produces a large, dramatic delta; the documented 100k-order seed shows a smaller one (see [DEVIATIONS §1 / §4](docs/DEVIATIONS.md)). Measure it yourself with [`benchmarks/bench_demo_latency.py`](benchmarks/bench_demo_latency.py) rather than trusting a number in a README.
 
 ---
 
 ## ✨ Features
 
 - 🛒 Seeded commerce dataset — users, products, orders, order_items (100k+ rows)
-- 🔀 Two Neon branches: `slowquery` (no indexes, seq scans) and `slowquery-fast` (3 indexes)
+- 🔀 Two Neon branches: `slowquery` (no indexes, seq scans) and `slowquery-fast` (4 indexes)
 - 🔍 slowquery-detective middleware installed with 4 compatibility shims
 - 📊 Dashboard API at `/_slowquery/*` — fingerprints, samples, plans, suggestions
 - 📡 SSE stream for live p95 updates to the frontend
@@ -95,13 +95,15 @@ flowchart LR
 ```mermaid
 flowchart LR
     subgraph Slow Branch
-        SlowQ[SELECT … ORDER BY created_at] --> SeqScan[Seq Scan<br/>cost 14209<br/>~1200ms]
+        SlowQ[SELECT … ORDER BY created_at] --> SeqScan[Seq Scan + Sort<br/>no index]
     end
     subgraph Fast Branch
-        FastQ[Same query] --> IdxScan[Index Scan<br/>ix_orders_created_at<br/>~18ms]
+        FastQ[Same query] --> IdxScan[Index Scan<br/>ix_orders_created_at]
     end
     Switch[POST /branches/switch<br/>target: fast] --> FastQ
 ```
+
+> The exact cost / latency numbers depend on seed size and the Neon compute tier, so they are not asserted here. Run [`benchmarks/bench_demo_latency.py`](benchmarks/bench_demo_latency.py) against your own seeded branches to get real figures.
 
 ---
 

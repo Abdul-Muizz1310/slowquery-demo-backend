@@ -109,7 +109,7 @@ The most expensive plan will be a `Limit` over a `Sort` over a `Seq Scan` on the
 Three things the spec promised that this repo's `v0.1.0` doesn't deliver. Each has a documented rationale and close path in [DEVIATIONS.md](DEVIATIONS.md):
 
 1. **`seq_scan_large_table` and `n_plus_one` rules don't fire in the current configuration** ([DEVIATIONS.md §2](DEVIATIONS.md#2-rules-engine-1-of-3-rules-firing-on-live-traffic)).
-2. **`POST /branches/switch` updates state but doesn't rebuild the SQLAlchemy engine at runtime** ([DEVIATIONS.md §3](DEVIATIONS.md#3-post-branchesswitch-does-not-actually-rebuild-the-engine)).
+2. **`POST /branches/switch` rebuilds the commerce engine, clears the buffer, and re-attaches the in-process listeners — but the drainer's EXPLAIN pool does not yet repoint at the new branch** ([DEVIATIONS.md §3](DEVIATIONS.md#3-post-branchesswitch-rebuilds-the-commerce-engine-but-the-observability-explain-pool-does-not-follow-the-swap)).
 3. **LLM fallback is off by default** ([DEVIATIONS.md §5](DEVIATIONS.md#5-llm-fallback-llm_fallback_enabled-is-off-in-production)).
 
 ## When the dashboard lands (Phase 4c)

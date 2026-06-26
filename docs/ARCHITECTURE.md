@@ -177,14 +177,14 @@ flowchart LR
     Switch["branches/switch endpoint<br/>BranchSwitcher service"]
     BranchState["(.branch_state file)"]
     Slow[("Neon slowquery branch<br/>8 tables, NO indexes on<br/>orders.user_id<br/>order_items.order_id<br/>order_items.product_id")]
-    Fast[("Neon slowquery-fast branch<br/>same 8 tables + 3 indexes<br/>via seed_fast.py")]
+    Fast[("Neon slowquery-fast branch<br/>same 8 tables + 4 indexes<br/>via seed_fast.py")]
 
     App --> Slow
     Switch --> BranchState
-    Switch -. "planned: rebuild engine" .-> Fast
+    Switch -- "rebuild engine + swap on app.state" --> Fast
 ```
 
-The branch-switch code path exists (request body validation, asyncio.Lock, state persistence) but does not yet rebuild the SQLAlchemy engine at runtime against the fast URL -- see [DEVIATIONS.md](DEVIATIONS.md).
+The branch-switch code path rebuilds the SQLAlchemy engine at runtime: it builds a new `AsyncEngine` against the target URL, health-checks it with `SELECT 1`, atomically swaps `app.state.engine` + `app.state.db_sessionmaker`, clears the rolling buffer, and re-attaches the slowquery listeners to the new engine. The one remaining gap is that the drainer's EXPLAIN pool does not yet repoint at the new branch -- see [DEVIATIONS.md §3](DEVIATIONS.md).
 
 ## Key endpoints
 
