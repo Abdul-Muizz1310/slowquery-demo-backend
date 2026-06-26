@@ -53,7 +53,7 @@ The demo's punchline: switch from the `slowquery` branch (no indexes, seq scans)
 - 📡 SSE stream for live p95 updates to the frontend
 - 🔀 Branch switch endpoint — swap slow ↔ fast in one POST
 - 🚦 Traffic generator script for burst testing
-- 🧪 213 unit + 49 integration tests (Testcontainers), 100% line coverage
+- 🧪 213 unit + 49 integration tests (Testcontainers), 98% line coverage
 - 🛡️ Pydantic v2 schemas, `Literal` types, frozen DTOs
 - 🚀 Render free tier with auto-deploy via CI webhook
 
@@ -164,7 +164,7 @@ src/slowquery_demo/
 | **Middleware** | [`slowquery-detective`](https://pypi.org/project/slowquery-detective/) v0.1.0 (with 4 in-repo compatibility shims) |
 | **Database** | Neon serverless Postgres, two branches (`slowquery` / `slowquery-fast`) |
 | **Migrations** | Alembic async env, one migration (`0001_initial.py`) — full 8-table schema |
-| **Tests** | pytest + pytest-asyncio, 213 unit + 49 integration (Testcontainers), 100% coverage |
+| **Tests** | pytest + pytest-asyncio, 213 unit + 49 integration (Testcontainers), 98% coverage |
 | **Lint / Types** | ruff + mypy `--strict` on `src/` |
 | **Hosting** | Render Free tier, auto-deploy via deploy-hook webhook from CI |
 | **CI** | GitHub Actions: lint → test → build → deploy |
@@ -215,7 +215,7 @@ uv run pytest --cov=src/slowquery_demo --cov-report=term-missing
 |---|---|
 | **Unit tests** | 213 |
 | **Integration tests** | 49 (Testcontainers) |
-| **Line coverage** | **100%** |
+| **Line coverage** | **98%** |
 | **Methodology** | Red-first spec-TDD. Every spec in `docs/specs/` with enumerated test cases before code ships. |
 
 ---
