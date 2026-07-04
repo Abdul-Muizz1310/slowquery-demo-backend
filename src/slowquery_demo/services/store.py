@@ -22,6 +22,7 @@ Design notes
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Final
 
@@ -41,15 +42,19 @@ from slowquery_demo.services.store_errors import StoreWriterError
 _STATEMENTS_UPSERT_FINGERPRINT = "INSERT INTO query_fingerprints (id, fingerprint) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET last_seen = now(), call_count = query_fingerprints.call_count + 1"  # fmt: skip
 _STATEMENTS_RECORD_SAMPLE = "INSERT INTO query_samples (fingerprint_id, duration_ms, rows) VALUES ($1, $2, $3)"  # fmt: skip
 _STATEMENTS_RECORD_SAMPLE_STATS = "WITH recent AS (SELECT duration_ms FROM query_samples WHERE fingerprint_id = $1 ORDER BY sampled_at DESC LIMIT $2) UPDATE query_fingerprints SET p50_ms = (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms) FROM recent), p95_ms = (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) FROM recent), p99_ms = (SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms) FROM recent), max_ms = (SELECT max(duration_ms) FROM recent), total_ms = total_ms + $3::bigint, last_seen = now() WHERE id = $1"  # fmt: skip
+_STATEMENTS_RECORD_SAMPLE_BUMP = "UPDATE query_fingerprints SET total_ms = total_ms + $2::bigint, last_seen = now() WHERE id = $1"  # fmt: skip
 _STATEMENTS_UPSERT_PLAN = "INSERT INTO explain_plans (fingerprint_id, plan_json, plan_text, cost, captured_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (fingerprint_id) DO UPDATE SET plan_json = EXCLUDED.plan_json, plan_text = EXCLUDED.plan_text, cost = EXCLUDED.cost, captured_at = now()"  # fmt: skip
 _STATEMENTS_INSERT_SUGGESTIONS = "INSERT INTO suggestions (fingerprint_id, kind, sql, source, rationale) SELECT $1, unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::text[]) ON CONFLICT (fingerprint_id, kind, sql) DO NOTHING"  # fmt: skip
+_STATEMENTS_PRUNE_SAMPLES = "DELETE FROM query_samples WHERE sampled_at < now() - make_interval(secs => $1)"  # fmt: skip
 
 _STATEMENTS: Final[dict[str, str]] = {
     "upsert_fingerprint": _STATEMENTS_UPSERT_FINGERPRINT,
     "record_sample": _STATEMENTS_RECORD_SAMPLE,
     "record_sample_stats": _STATEMENTS_RECORD_SAMPLE_STATS,
+    "record_sample_bump": _STATEMENTS_RECORD_SAMPLE_BUMP,
     "upsert_plan": _STATEMENTS_UPSERT_PLAN,
     "insert_suggestions": _STATEMENTS_INSERT_SUGGESTIONS,
+    "prune_samples": _STATEMENTS_PRUNE_SAMPLES,
 }
 
 # Window of recent samples used for rolling percentiles.
@@ -72,6 +77,10 @@ class PostgresStoreWriter(StoreWriter):
         self._owns_pool: bool = pool is None
         self._closed: bool = False
         self._sample_window = sample_window
+        # Serialises lazy pool construction so two concurrent first-callers
+        # (the drainer task and an HTTP force-explain) cannot each build a
+        # pool and silently leak one.
+        self._pool_lock = asyncio.Lock()
 
     # --- lifecycle ------------------------------------------------------
 
@@ -80,17 +89,24 @@ class PostgresStoreWriter(StoreWriter):
             raise StoreWriterError("store writer is closed")
         if self._pool is not None:
             return self._pool
-        # Library passes ``store_url`` through as-is from Settings, which
-        # may carry the SQLAlchemy ``+asyncpg`` dialect suffix and libpq
-        # query params. asyncpg rejects both, so normalise here.
-        from slowquery_demo.core.db_config import to_raw_asyncpg_dsn
+        async with self._pool_lock:
+            # Re-check under the lock: another coroutine may have built the
+            # pool while we were waiting to acquire it.
+            if self._pool is not None:
+                return self._pool
+            if self._closed:
+                raise StoreWriterError("store writer is closed")
+            # Library passes ``store_url`` through as-is from Settings, which
+            # may carry the SQLAlchemy ``+asyncpg`` dialect suffix and libpq
+            # query params. asyncpg rejects both, so normalise here.
+            from slowquery_demo.core.db_config import to_raw_asyncpg_dsn
 
-        dsn = to_raw_asyncpg_dsn(self._store_url)
-        try:
-            self._pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=4)
-        except Exception as exc:  # pragma: no cover - exercised via integration
-            raise StoreWriterError(f"failed to build asyncpg pool: {exc}") from exc
-        return self._pool
+            dsn = to_raw_asyncpg_dsn(self._store_url)
+            try:
+                self._pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=4)
+            except Exception as exc:  # pragma: no cover - exercised via integration
+                raise StoreWriterError(f"failed to build asyncpg pool: {exc}") from exc
+            return self._pool
 
     async def close(self) -> None:
         if self._closed:
@@ -120,23 +136,58 @@ class PostgresStoreWriter(StoreWriter):
         fingerprint_id: str,
         duration_ms: float,
         rows: int | None = None,
+        *,
+        recompute_stats: bool = True,
     ) -> None:
+        """Persist a sample and update the fingerprint's rolling stats.
+
+        ``total_ms`` and ``last_seen`` are always kept current. The
+        expensive ``percentile_cont`` recompute over the recent window
+        runs only when ``recompute_stats`` is ``True``; the drainer
+        throttles it per fingerprint so a burst does not fire one full
+        percentile recompute per query (OPT-1).
+        """
         if duration_ms <= 0:
             raise ValueError("duration_ms must be > 0")
         pool = await self._ensure_pool()
         try:
             async with pool.acquire() as conn, conn.transaction():
                 await conn.execute(_STATEMENTS["record_sample"], fingerprint_id, duration_ms, rows)
-                await conn.execute(
-                    _STATEMENTS["record_sample_stats"],
-                    fingerprint_id,
-                    self._sample_window,
-                    int(duration_ms),
-                )
+                if recompute_stats:
+                    await conn.execute(
+                        _STATEMENTS["record_sample_stats"],
+                        fingerprint_id,
+                        self._sample_window,
+                        int(duration_ms),
+                    )
+                else:
+                    await conn.execute(
+                        _STATEMENTS["record_sample_bump"],
+                        fingerprint_id,
+                        int(duration_ms),
+                    )
         except StoreWriterError:
             raise
         except Exception as exc:
             raise StoreWriterError(f"record_sample failed: {exc}") from exc
+
+    async def prune_samples(self, retention_seconds: float) -> None:
+        """Delete query_samples rows older than ``retention_seconds``.
+
+        Bounds unbounded growth of ``query_samples`` on free-tier Neon
+        (COST-1): a perpetual traffic generator inserts one row per query
+        with no natural TTL. A non-positive retention disables pruning.
+        """
+        if retention_seconds <= 0:
+            return
+        pool = await self._ensure_pool()
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(_STATEMENTS["prune_samples"], float(retention_seconds))
+        except StoreWriterError:
+            raise
+        except Exception as exc:
+            raise StoreWriterError(f"prune_samples failed: {exc}") from exc
 
     async def upsert_plan(
         self,

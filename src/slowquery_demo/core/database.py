@@ -34,7 +34,21 @@ def build_engine(url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession
     still get a working engine.
     """
     resolved = normalise_asyncpg_url(url)
-    engine = create_async_engine(resolved, future=True)
+    engine = create_async_engine(
+        resolved,
+        future=True,
+        # Neon suspends idle compute and Render free tier idles too, so a
+        # pooled connection can be silently dropped between requests. Pre-ping
+        # discards dead connections before use and recycle caps their age so
+        # the first request after an idle window doesn't 500 (P9). Conservative
+        # explicit pool limits keep a handful of concurrent dashboard tabs /
+        # SSE streams from exhausting the pool and 503-ing /health.
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=10,
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     return engine, factory
 

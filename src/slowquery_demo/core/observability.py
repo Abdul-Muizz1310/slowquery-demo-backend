@@ -65,6 +65,7 @@ import random
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import slowquery_detective.hooks as _sqd_hooks
@@ -255,86 +256,155 @@ setattr(_sqd_hooks, "attach", _patched_attach)  # noqa: B010
 setattr(_sqd_middleware, "attach", _patched_attach)  # noqa: B010
 
 
+@dataclass
+class _DrainState:
+    """Mutable per-drainer bookkeeping + tunables.
+
+    Extracting this (and :func:`_drain_one`) out of the ``while True``
+    loop lets the two behaviours the audit flagged — the per-fingerprint
+    percentile-recompute throttle (OPT-1) and the periodic retention
+    prune (COST-1) — be unit-tested on the real drain path with an
+    injected clock, instead of living in an untestable infinite loop.
+    """
+
+    threshold_ms: float
+    # query_samples retention (seconds); <= 0 disables the periodic prune.
+    retention_s: float
+    # Minimum seconds between full percentile recomputes per fingerprint;
+    # <= 0 recomputes on every sample (legacy behaviour).
+    stats_interval: float
+    # How often (seconds of drainer runtime) the retention prune fires.
+    prune_interval_s: float = 300.0
+    # Per-fingerprint EXPLAIN cooldown so a burst doesn't swamp Neon.
+    cooldown_seconds: float = 60.0
+
+    cooldown: dict[str, float] = field(default_factory=dict)
+    last_stats: dict[str, float] = field(default_factory=dict)
+    last_prune: float | None = None
+
+
+async def _drain_one(
+    store: Any,
+    state: _DrainState,
+    item: _BridgeItem,
+    *,
+    now: float | None = None,
+) -> None:
+    """Process a single bridge item. The real drain path for one query.
+
+    For the item, this:
+
+    1. Upserts the fingerprint (bumps call_count, refreshes last_seen).
+    2. Records a sample. The expensive ``percentile_cont`` recompute is
+       throttled per fingerprint via ``stats_interval`` (OPT-1); bursts
+       within the window only bump ``total_ms``/``last_seen``.
+    3. Periodically prunes ``query_samples`` older than ``retention_s``
+       so the table can't grow without bound on free-tier Neon (COST-1).
+    4. If the sample exceeds ``threshold_ms`` AND the fingerprint is
+       outside its per-fingerprint cooldown, runs ``EXPLAIN (FORMAT
+       JSON)`` through the store's asyncpg pool and feeds the plan to
+       ``run_rules`` for suggestions. Plan + suggestions are persisted.
+
+    ``now`` is injectable so the throttle/prune timing is unit-testable;
+    it defaults to ``time.monotonic()`` on the live path.
+    """
+    now = time.monotonic() if now is None else now
+    if state.last_prune is None:
+        # First item seen: anchor the prune clock so a prune can't fire
+        # on the very first observed query.
+        state.last_prune = now
+
+    fp_id, canonical_sql, raw_statement, raw_parameters, duration_ms = item
+
+    try:
+        await store.upsert_fingerprint(fp_id, canonical_sql)
+    except Exception:
+        _LOG.exception("slowquery.drainer.upsert_fingerprint_failed")
+        return
+
+    recompute = (
+        state.stats_interval <= 0
+        or (now - state.last_stats.get(fp_id, 0.0)) >= state.stats_interval
+    )
+    try:
+        await store.record_sample(
+            fp_id, duration_ms=duration_ms, rows=None, recompute_stats=recompute
+        )
+        if recompute:
+            state.last_stats[fp_id] = now
+    except Exception:
+        _LOG.exception("slowquery.drainer.record_sample_failed")
+
+    # Periodic retention prune to bound query_samples growth (COST-1).
+    if state.retention_s > 0 and (now - state.last_prune) >= state.prune_interval_s:
+        state.last_prune = now
+        try:
+            await store.prune_samples(state.retention_s)
+        except Exception:
+            _LOG.exception("slowquery.drainer.prune_samples_failed")
+
+    if duration_ms < state.threshold_ms:
+        return
+
+    if state.cooldown.get(fp_id, 0) > now:
+        return
+
+    plan = await _run_direct_explain(store, raw_statement, raw_parameters)
+    if plan is None:
+        state.cooldown[fp_id] = now + state.cooldown_seconds
+        return
+
+    try:
+        suggestions = run_rules(plan, canonical_sql, fingerprint_id=fp_id)
+    except Exception:
+        _LOG.exception("slowquery.drainer.rules_failed")
+        suggestions = []
+
+    cost = 0.0
+    plan_root = plan.get("Plan") if isinstance(plan, dict) else None
+    if isinstance(plan_root, dict):
+        cost = float(plan_root.get("Total Cost") or 0.0)
+
+    try:
+        await store.upsert_plan(fp_id, plan_json=plan, plan_text=json.dumps(plan), cost=cost)
+    except Exception:
+        _LOG.exception("slowquery.drainer.upsert_plan_failed")
+
+    if suggestions:
+        try:
+            await store.insert_suggestions(fp_id, suggestions)
+        except Exception:
+            _LOG.exception("slowquery.drainer.insert_suggestions_failed")
+
+    state.cooldown[fp_id] = now + state.cooldown_seconds
+
+
+def _build_drain_state(app: FastAPI) -> _DrainState:
+    """Construct the drainer's state from ``app.state`` + settings."""
+    settings = getattr(app.state, "settings", None)
+    return _DrainState(
+        threshold_ms=app.state.slowquery_threshold_ms,
+        retention_s=getattr(settings, "slowquery_sample_retention_s", 86_400.0),
+        stats_interval=getattr(settings, "slowquery_stats_recompute_interval_s", 2.0),
+    )
+
+
 async def _drainer(app: FastAPI) -> None:
     """Background task that consumes the bridge queue.
 
-    For every bridge item, the drainer:
-
-    1. Upserts the fingerprint (bumps call_count, refreshes last_seen).
-    2. Records a sample (keeps rolling percentile stats fresh).
-    3. If the sample exceeds ``threshold_ms`` AND the fingerprint is
-       outside its per-fingerprint cooldown window, runs
-       ``EXPLAIN (FORMAT JSON)`` against the real captured statement
-       + parameters through the store's asyncpg pool, then feeds the
-       plan to the library's ``run_rules`` for suggestions. Plan +
-       suggestions get written through the same store writer.
+    Owns the throttle/prune bookkeeping (:class:`_DrainState`) and
+    delegates per-item work to :func:`_drain_one` so the composed flow
+    is exercised by unit tests rather than living in an untestable loop.
     """
     store = app.state.slowquery_store
-    threshold_ms = app.state.slowquery_threshold_ms
-
-    # Per-fingerprint cooldown — run at most one EXPLAIN per fingerprint
-    # per minute so a traffic burst doesn't swamp Neon.
-    cooldown: dict[str, float] = {}
-    cooldown_seconds = 60.0
+    state = _build_drain_state(app)
 
     while True:
         try:
-            (
-                fp_id,
-                canonical_sql,
-                raw_statement,
-                raw_parameters,
-                duration_ms,
-            ) = await _BRIDGE_QUEUE.get()
+            item = await _BRIDGE_QUEUE.get()
         except asyncio.CancelledError:
             return
-
-        try:
-            await store.upsert_fingerprint(fp_id, canonical_sql)
-        except Exception:
-            _LOG.exception("slowquery.drainer.upsert_fingerprint_failed")
-            continue
-
-        try:
-            await store.record_sample(fp_id, duration_ms=duration_ms, rows=None)
-        except Exception:
-            _LOG.exception("slowquery.drainer.record_sample_failed")
-
-        if duration_ms < threshold_ms:
-            continue
-
-        now = time.monotonic()
-        if cooldown.get(fp_id, 0) > now:
-            continue
-
-        plan = await _run_direct_explain(store, raw_statement, raw_parameters)
-        if plan is None:
-            cooldown[fp_id] = now + cooldown_seconds
-            continue
-
-        try:
-            suggestions = run_rules(plan, canonical_sql, fingerprint_id=fp_id)
-        except Exception:
-            _LOG.exception("slowquery.drainer.rules_failed")
-            suggestions = []
-
-        cost = 0.0
-        plan_root = plan.get("Plan") if isinstance(plan, dict) else None
-        if isinstance(plan_root, dict):
-            cost = float(plan_root.get("Total Cost") or 0.0)
-
-        try:
-            await store.upsert_plan(fp_id, plan_json=plan, plan_text=json.dumps(plan), cost=cost)
-        except Exception:
-            _LOG.exception("slowquery.drainer.upsert_plan_failed")
-
-        if suggestions:
-            try:
-                await store.insert_suggestions(fp_id, suggestions)
-            except Exception:
-                _LOG.exception("slowquery.drainer.insert_suggestions_failed")
-
-        cooldown[fp_id] = now + cooldown_seconds
+        await _drain_one(store, state, item)
 
 
 async def _run_direct_explain(
