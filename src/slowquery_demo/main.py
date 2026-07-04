@@ -21,6 +21,7 @@ from slowquery_demo.api.routers.order_items import router as order_items_router
 from slowquery_demo.api.routers.orders import router as orders_router
 from slowquery_demo.api.routers.products import router as products_router
 from slowquery_demo.api.routers.users import router as users_router
+from slowquery_demo.core.access import CooldownLimiter
 from slowquery_demo.core.branch_state import load_branch
 from slowquery_demo.core.config import Settings
 from slowquery_demo.core.database import build_engine
@@ -30,7 +31,7 @@ from slowquery_demo.core.observability import (
     on_branch_switch,
     slowquery_lifespan,
 )
-from slowquery_demo.core.platform import install_platform_middleware
+from slowquery_demo.core.platform import install_platform_middleware, resolve_cors_origins
 from slowquery_demo.core.platform_token import install_platform_token
 from slowquery_demo.services.branch_switcher import BranchSwitcher
 
@@ -107,13 +108,18 @@ def create_app() -> FastAPI:
     engine, session_factory = build_engine(settings.database_url)
 
     app = FastAPI(title="slowquery_demo", version="0.1.0", lifespan=slowquery_lifespan)
-    install_platform_middleware(app, service_name="slowquery_demo")
+    install_platform_middleware(
+        app,
+        service_name="slowquery_demo",
+        cors_origins=resolve_cors_origins(settings.cors_origins, app_env=settings.app_env),
+    )
     install_platform_token(app, demo_mode=settings.demo_mode)
     register_exception_handlers(app)
 
     app.state.settings = settings
     app.state.engine = engine
     app.state.db_sessionmaker = session_factory
+    app.state.mutation_limiter = CooldownLimiter(settings.demo_mutation_cooldown_s)
     app.state.branch_current = load_branch()
     app.state.branch_switcher = BranchSwitcher(
         initial=app.state.branch_current,

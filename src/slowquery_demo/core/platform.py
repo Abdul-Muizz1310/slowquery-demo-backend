@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import text
 
@@ -32,11 +32,26 @@ _PROD_ORIGINS = [
 _HEALTH_CHECK_TIMEOUT_S = 5.0
 
 
-def _get_cors_origins() -> list[str]:
-    origins = list(_PROD_ORIGINS)
-    if os.environ.get("APP_ENV", "development") != "production":
+def resolve_cors_origins(cors_origins: str, *, app_env: str) -> list[str]:
+    """Resolve the effective CORS allow-list from typed configuration.
+
+    Honours the ``CORS_ORIGINS`` setting (comma-separated) so operators
+    can change the allow-list via env and have it take effect. Falls back
+    to the built-in production origins when the setting is empty, and adds
+    ``localhost:3000`` for local development. Deduplicates while
+    preserving order.
+    """
+    configured = [o.strip() for o in cors_origins.split(",") if o.strip()]
+    origins = configured if configured else list(_PROD_ORIGINS)
+    if app_env != "production" and "http://localhost:3000" not in origins:
         origins.append("http://localhost:3000")
-    return origins
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for origin in origins:
+        if origin not in seen:
+            seen.add(origin)
+            ordered.append(origin)
+    return ordered
 
 
 def _resolve_version() -> str:
@@ -69,12 +84,23 @@ def _resolve_commit_sha() -> str:
     return os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_SHA", "unknown")
 
 
-def install_platform_middleware(app: FastAPI, *, service_name: str) -> None:
-    """Attach platform endpoints, CORS, and request-id middleware to ``app``."""
+def install_platform_middleware(
+    app: FastAPI,
+    *,
+    service_name: str,
+    cors_origins: list[str],
+) -> None:
+    """Attach platform endpoints, CORS, and request-id middleware to ``app``.
+
+    ``cors_origins`` is the resolved allow-list (see
+    :func:`resolve_cors_origins`); the caller derives it from the typed
+    :class:`~slowquery_demo.core.config.Settings` so ``CORS_ORIGINS`` is
+    honoured rather than silently ignored.
+    """
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_get_cors_origins(),
+        allow_origins=cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
@@ -114,6 +140,11 @@ def install_platform_middleware(app: FastAPI, *, service_name: str) -> None:
                 "db": "ok" if db_ok else "down",
             },
         )
+
+    @app.get("/", include_in_schema=False)
+    async def _root() -> RedirectResponse:
+        """Redirect the bare root to the interactive API docs."""
+        return RedirectResponse(url="/docs")
 
     @app.get("/version", include_in_schema=False)
     async def _version() -> JSONResponse:

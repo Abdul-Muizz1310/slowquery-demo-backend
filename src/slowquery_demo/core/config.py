@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     demo_mode: bool = True
     cors_origins: str = ""
 
+    # --- mutation gating (public-URL hardening) ---
+    # Shared secret required to call the state-mutating endpoints
+    # (POST /branches/switch, POST /_slowquery/*/force-explain) even
+    # while DEMO_MODE bypasses the platform-token middleware. When unset,
+    # the destructive force-explain endpoint fails closed (403) so an
+    # anonymous visitor can never overwrite a genuine captured plan.
+    demo_mutation_token: str | None = None
+    # Per-client cooldown (seconds) enforced on mutating endpoints even in
+    # demo mode. 0 disables the cooldown (the default keeps unit tests
+    # deterministic); production sets a positive value via env.
+    demo_mutation_cooldown_s: float = Field(default=0.0, ge=0.0)
+
     # --- database ---
     # Defaults are a localhost dummy URL so ``create_app()`` can build an
     # AsyncEngine without a live Postgres; unit tests override ``get_db``
@@ -36,6 +48,15 @@ class Settings(BaseSettings):
     slowquery_threshold_ms: int = Field(default=100, gt=0)
     slowquery_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     slowquery_store_url: str | None = None
+    # query_samples retention (seconds). The drainer prunes rows older than
+    # this on a periodic tick so the table doesn't grow without bound on
+    # free-tier Neon. 0 disables pruning. Default: 1 day.
+    slowquery_sample_retention_s: float = Field(default=86_400.0, ge=0.0)
+    # Minimum interval (seconds) between full percentile recomputes per
+    # fingerprint. Bursts within this window only bump total_ms/last_seen,
+    # coalescing the expensive percentile_cont recompute. 0 recomputes every
+    # sample (legacy behaviour).
+    slowquery_stats_recompute_interval_s: float = Field(default=2.0, ge=0.0)
 
     # --- LLM fallback (OpenRouter) ---
     llm_fallback_enabled: bool = False

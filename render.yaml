@@ -22,8 +22,12 @@ services:
         sync: false
       - key: NEON_PROJECT_ID
         sync: false
+      # Keep the LLM fallback OFF in production (matches DEVIATIONS §5).
+      # When true, the app fails fast at boot unless OPENROUTER_API_KEY is
+      # also set (see core/observability._build_llm_config), so flipping
+      # this to "true" requires provisioning the key first.
       - key: LLM_FALLBACK_ENABLED
-        value: "true"
+        value: "false"
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_BASE_URL
@@ -34,5 +38,15 @@ services:
         value: "https://slowquery-dashboard-frontend.vercel.app,http://localhost:3000"
       - key: DEMO_MODE
         value: "true"
+      # Per-client cooldown (seconds) on the state-mutating endpoints
+      # (branch switch, force-explain), enforced even under DEMO_MODE.
+      - key: DEMO_MUTATION_COOLDOWN_S
+        value: "3"
+      # Shared secret required to call the destructive force-explain
+      # endpoint (and, when set, branch switch) even in demo mode. Unset
+      # here on purpose: force-explain fails closed until an operator
+      # provisions this in the Render dashboard.
+      - key: DEMO_MUTATION_TOKEN
+        sync: false
       - key: PORT
         value: "8000"
