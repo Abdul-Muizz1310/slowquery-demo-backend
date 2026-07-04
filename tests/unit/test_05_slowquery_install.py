@@ -195,3 +195,170 @@ def test_reattach_slowquery_noop_when_not_installed() -> None:
 
     app = FastAPI()
     assert reattach_slowquery(app) is False
+
+
+# --- Drainer composed flow: OPT-1 recompute throttle + COST-1 retention prune ---
+#
+# The store primitives (``record_sample(recompute_stats=...)`` and
+# ``prune_samples``) are unit-tested in isolation in test_01. These tests
+# exercise the *decision* the drainer makes on the real per-item drain path
+# (``_drain_one``) with an injected clock, closing the refinement-audit gap:
+# a regression that reverted the throttle to "always recompute" (OPT-1) or
+# stopped the periodic prune from ever firing (COST-1) would previously pass
+# every test because ``_drain_one`` had zero coverage.
+
+
+def _drain_store_mock():  # type: ignore[no-untyped-def]
+    """A store whose write hooks are all recording AsyncMocks."""
+    from unittest.mock import AsyncMock
+
+    store = AsyncMock()
+    store.upsert_fingerprint = AsyncMock()
+    store.record_sample = AsyncMock()
+    store.prune_samples = AsyncMock()
+    return store
+
+
+def _bridge_item(duration_ms: float, fp_id: str = "abc123"):  # type: ignore[no-untyped-def]
+    """A ``_BridgeItem`` = (fp_id, canonical_sql, raw_statement, params, duration_ms)."""
+    return (fp_id, "SELECT 1", "SELECT 1", (), duration_ms)
+
+
+async def test_drain_one_recomputes_stats_on_first_sample_then_throttles() -> None:
+    """OPT-1: first sample per fingerprint recomputes percentiles; a second
+    sample inside ``stats_interval`` only bumps totals (recompute_stats=False)."""
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    # retention_s=0 isolates the throttle decision from the prune decision.
+    state = _DrainState(threshold_ms=1_000_000.0, retention_s=0.0, stats_interval=2.0)
+
+    await _drain_one(store, state, _bridge_item(50.0), now=100.0)
+    assert store.record_sample.await_args.kwargs["recompute_stats"] is True
+    assert state.last_stats["abc123"] == 100.0
+
+    # 1s later — still inside the 2s window — must NOT recompute.
+    await _drain_one(store, state, _bridge_item(50.0), now=101.0)
+    assert store.record_sample.await_args.kwargs["recompute_stats"] is False
+    assert state.last_stats["abc123"] == 100.0  # last-recompute stamp unchanged
+
+
+async def test_drain_one_recomputes_again_after_interval_elapses() -> None:
+    """OPT-1: once ``stats_interval`` has elapsed the recompute fires again and
+    the per-fingerprint stamp advances."""
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    state = _DrainState(threshold_ms=1_000_000.0, retention_s=0.0, stats_interval=2.0)
+    state.last_stats["abc123"] = 100.0
+
+    await _drain_one(store, state, _bridge_item(50.0), now=103.0)  # 3s >= 2s window
+    assert store.record_sample.await_args.kwargs["recompute_stats"] is True
+    assert state.last_stats["abc123"] == 103.0
+
+
+async def test_drain_one_always_recomputes_when_interval_nonpositive() -> None:
+    """OPT-1: ``stats_interval <= 0`` disables the throttle (legacy behaviour)."""
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    state = _DrainState(threshold_ms=1_000_000.0, retention_s=0.0, stats_interval=0.0)
+
+    await _drain_one(store, state, _bridge_item(50.0), now=100.0)
+    assert store.record_sample.await_args.kwargs["recompute_stats"] is True
+
+
+async def test_drain_one_anchors_prune_clock_and_skips_first_prune() -> None:
+    """COST-1: the prune clock is anchored on the first item so a prune cannot
+    fire on the very first observed query."""
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    state = _DrainState(
+        threshold_ms=1_000_000.0, retention_s=86_400.0, stats_interval=0.0, prune_interval_s=300.0
+    )
+    assert state.last_prune is None
+
+    await _drain_one(store, state, _bridge_item(50.0), now=500.0)
+    assert state.last_prune == 500.0
+    store.prune_samples.assert_not_awaited()
+
+
+async def test_drain_one_does_not_prune_within_interval() -> None:
+    """COST-1: no prune while less than ``prune_interval_s`` has elapsed."""
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    state = _DrainState(
+        threshold_ms=1_000_000.0, retention_s=86_400.0, stats_interval=0.0, prune_interval_s=300.0
+    )
+    state.last_prune = 100.0
+
+    await _drain_one(store, state, _bridge_item(50.0), now=200.0)  # 100s < 300s
+    store.prune_samples.assert_not_awaited()
+    assert state.last_prune == 100.0  # clock not advanced
+
+
+async def test_drain_one_prunes_after_interval_elapses() -> None:
+    """COST-1: once ``prune_interval_s`` has elapsed the drainer fires the
+    retention DELETE with the configured retention, and re-anchors the clock."""
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    state = _DrainState(
+        threshold_ms=1_000_000.0, retention_s=86_400.0, stats_interval=0.0, prune_interval_s=300.0
+    )
+    state.last_prune = 100.0
+
+    await _drain_one(store, state, _bridge_item(50.0), now=500.0)  # 400s >= 300s
+    store.prune_samples.assert_awaited_once_with(86_400.0)
+    assert state.last_prune == 500.0
+
+
+async def test_drain_one_never_prunes_when_retention_disabled() -> None:
+    """COST-1: ``retention_s <= 0`` disables the periodic prune entirely, even
+    long after ``prune_interval_s`` would otherwise have elapsed."""
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    state = _DrainState(
+        threshold_ms=1_000_000.0, retention_s=0.0, stats_interval=0.0, prune_interval_s=300.0
+    )
+    state.last_prune = 100.0
+
+    await _drain_one(store, state, _bridge_item(50.0), now=1_000_000.0)
+    store.prune_samples.assert_not_awaited()
+
+
+def test_build_drain_state_wires_tunables_from_settings() -> None:
+    """OPT-1/COST-1 wiring: the drainer's throttle/prune tunables come from the
+    live Settings + app.state, so the decisions the tests above exercise are the
+    ones running on the deployed drain path (not test-only defaults)."""
+    from slowquery_demo.core.observability import _build_drain_state
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    state = _build_drain_state(app)
+
+    assert state.threshold_ms == app.state.slowquery_threshold_ms
+    assert state.retention_s == app.state.settings.slowquery_sample_retention_s
+    assert state.stats_interval == app.state.settings.slowquery_stats_recompute_interval_s
+
+
+async def test_drain_one_prune_failure_is_swallowed_not_fatal() -> None:
+    """COST-1 negative-space: a failing prune must not abort the drain loop —
+    the fingerprint/sample writes still happened and the item completes."""
+    from unittest.mock import AsyncMock
+
+    from slowquery_demo.core.observability import _drain_one, _DrainState
+
+    store = _drain_store_mock()
+    store.prune_samples = AsyncMock(side_effect=RuntimeError("neon down"))
+    state = _DrainState(
+        threshold_ms=1_000_000.0, retention_s=86_400.0, stats_interval=0.0, prune_interval_s=300.0
+    )
+    state.last_prune = 100.0
+
+    # Must not raise despite prune_samples blowing up.
+    await _drain_one(store, state, _bridge_item(50.0), now=500.0)
+    store.record_sample.assert_awaited_once()

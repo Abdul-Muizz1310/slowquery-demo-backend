@@ -38,3 +38,33 @@ def test_openapi_exposes_two_dashboard_endpoints(test_client) -> None:  # type: 
     paths = set(schema["paths"].keys())
     assert "/_slowquery/queries" in paths
     assert "/_slowquery/queries/{fingerprint_id}" in paths
+
+
+def test_fingerprint_id_regex_accepts_valid_hex_ids() -> None:
+    """Spec 08 test 11 (negative-space): the id validator accepts 1..16 lowercase hex."""
+    from slowquery_demo.api.routers.dashboard import _FINGERPRINT_ID_RE
+
+    assert _FINGERPRINT_ID_RE.match("abcdef1234567890") is not None
+    assert _FINGERPRINT_ID_RE.match("a") is not None
+    assert _FINGERPRINT_ID_RE.match("0123456789abcdef") is not None
+
+
+def test_fingerprint_id_regex_rejects_out_of_alphabet_or_length() -> None:
+    """Spec 08 test 11 (negative-space): empty, uppercase, punctuation, and >16
+    chars are all rejected before any DB lookup — the id can't smuggle a payload."""
+    from slowquery_demo.api.routers.dashboard import _FINGERPRINT_ID_RE
+
+    assert _FINGERPRINT_ID_RE.match("") is None
+    assert _FINGERPRINT_ID_RE.match("ABCDEF") is None  # uppercase
+    assert _FINGERPRINT_ID_RE.match("xyz!") is None  # punctuation / non-hex
+    assert _FINGERPRINT_ID_RE.match("abcdef12345678901") is None  # 17 chars
+
+
+def test_extract_rule_returns_none_regardless_of_source() -> None:
+    """Spec 08: ``_extract_rule`` is a documented no-op today (the rule name is
+    not parsed out of the rationale); it must return ``None`` for every source
+    rather than raise, so the detail endpoint stays total."""
+    from slowquery_demo.api.routers.dashboard import _extract_rule
+
+    assert _extract_rule("Seq Scan on orders", "rules") is None
+    assert _extract_rule("some rationale", "llm") is None

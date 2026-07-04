@@ -31,3 +31,42 @@ def test_sse_generator_is_async_generator() -> None:
     from slowquery_demo.api.routers.dashboard import _sse_generator
 
     assert inspect.isasyncgenfunction(_sse_generator)
+
+
+async def test_sse_poll_acquires_and_releases_a_session_per_tick() -> None:
+    """MEDIUM fix: each poll opens a short-lived session and releases it.
+
+    The stream must not pin a pooled connection for its whole lifetime, so
+    ``_poll_fingerprints`` opens a session from the app's sessionmaker and
+    exits its context (releasing the connection) before returning.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from slowquery_demo.api.routers.dashboard import _poll_fingerprints
+
+    session = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=cm)
+
+    request = MagicMock()
+    request.app.state.db_sessionmaker = factory
+
+    async def _fake_list(sess: object) -> list[object]:
+        assert sess is session
+        return []
+
+    import slowquery_demo.api.routers.dashboard as dash
+
+    original = dash.repo.list_fingerprints
+    dash.repo.list_fingerprints = _fake_list  # type: ignore[assignment]
+    try:
+        result = await _poll_fingerprints(request)
+    finally:
+        dash.repo.list_fingerprints = original  # type: ignore[assignment]
+
+    assert result == []
+    factory.assert_called_once()  # a fresh session was opened for this tick
+    cm.__aenter__.assert_awaited_once()
+    cm.__aexit__.assert_awaited_once()  # and released before returning

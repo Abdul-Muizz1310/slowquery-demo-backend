@@ -503,6 +503,9 @@ def seeded_app_llm(
     monkeypatch.setenv("LLM_FALLBACK_ENABLED", "true")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("OPENROUTER_MODEL_PRIMARY", "test/model")
+    # force-explain is gated fail-closed behind an admin token; provision one
+    # so the LLM-fallback integration test can drive the endpoint.
+    monkeypatch.setenv("DEMO_MUTATION_TOKEN", "test-admin-token")
 
     _migrate_fresh(async_url)
     _seed_slow(async_url)

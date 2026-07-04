@@ -59,6 +59,10 @@ def _token(priv_pem: str, *, expired: bool = False) -> str:
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BASTION_SIGNING_KEY_PUBLIC", raising=False)
     monkeypatch.delenv("BASTION_PUBLIC_KEY_URL", raising=False)
+    monkeypatch.delenv("BASTION_EXPECTED_SERVICE", raising=False)
+    monkeypatch.delenv("BASTION_EXPECTED_ISSUER", raising=False)
+    monkeypatch.delenv("BASTION_EXPECTED_AUDIENCE", raising=False)
+    monkeypatch.delenv("BASTION_ALLOWED_ROLES", raising=False)
     platform_token.reset_public_key_cache()
 
 
@@ -118,14 +122,72 @@ def test_public_key_fetched_from_url_and_cached(monkeypatch: pytest.MonkeyPatch)
         def json(self) -> dict[str, str]:
             return {"kid": "test", "algorithm": "EdDSA", "publicKey": pub_b64}
 
-    def _fake_get(url: str, timeout: float) -> _Resp:
-        calls["n"] += 1
-        return _Resp()
+    class _FakeAsyncClient:
+        """Stand-in for ``httpx.AsyncClient`` used as an async context manager."""
 
-    monkeypatch.setattr(platform_token.httpx, "get", _fake_get)
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def get(self, url: str) -> _Resp:
+            calls["n"] += 1
+            return _Resp()
+
+    monkeypatch.setattr(platform_token.httpx, "AsyncClient", _FakeAsyncClient)
     client = _make_app(demo_mode=False)
     headers = {"X-Platform-Token": _token(priv_pem)}
     assert client.get("/protected", headers=headers).status_code == 200
     # Second request reuses the cached key (no second fetch).
     assert client.get("/protected", headers=headers).status_code == 200
     assert calls["n"] == 1
+
+
+def test_load_public_key_pem_is_async() -> None:
+    """P10 regression: the key loader must be a coroutine (no blocking get)."""
+    import inspect
+
+    assert inspect.iscoroutinefunction(platform_token.load_public_key_pem)
+
+
+def test_rejects_token_for_different_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SEC-1: a valid token minted for a sibling service is rejected."""
+    priv_pem, pub_b64 = _keypair()
+    monkeypatch.setenv("BASTION_SIGNING_KEY_PUBLIC", pub_b64)
+    monkeypatch.setenv("BASTION_EXPECTED_SERVICE", "slowquery-demo")
+    client = _make_app(demo_mode=False)
+    # Token's service claim is "slowquery-demo" (see _token) → accepted.
+    assert (
+        client.get("/protected", headers={"X-Platform-Token": _token(priv_pem)}).status_code == 200
+    )
+
+    # A token for another service must be rejected even though the signature is valid.
+    import datetime as dt
+
+    other = jwt.encode(
+        {
+            "sub": "bastion",
+            "role": "admin",
+            "service": "paper-trail",
+            "exp": dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60),
+        },
+        priv_pem,
+        algorithm="EdDSA",
+    )
+    assert client.get("/protected", headers={"X-Platform-Token": other}).status_code == 401
+
+
+def test_rejects_token_with_disallowed_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SEC-1: a valid token whose role is not in the allow-list is rejected."""
+    priv_pem, pub_b64 = _keypair()
+    monkeypatch.setenv("BASTION_SIGNING_KEY_PUBLIC", pub_b64)
+    monkeypatch.setenv("BASTION_ALLOWED_ROLES", "service,worker")
+    client = _make_app(demo_mode=False)
+    # _token mints role="admin", which is not in the allow-list.
+    assert (
+        client.get("/protected", headers={"X-Platform-Token": _token(priv_pem)}).status_code == 401
+    )

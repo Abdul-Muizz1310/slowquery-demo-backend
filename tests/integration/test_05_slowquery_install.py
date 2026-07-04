@@ -47,7 +47,12 @@ async def test_llm_called_once_on_rules_miss(seeded_app_llm, respx_mock) -> None
         )
     )
     # Synthetic plan path that rules don't match → LLM called.
-    seeded_app_llm.post("/_slowquery/queries/abc123/force-explain")
+    # force-explain is gated fail-closed; the seeded_app_llm fixture provisions
+    # DEMO_MUTATION_TOKEN, so send the matching admin token.
+    seeded_app_llm.post(
+        "/_slowquery/queries/abc123/force-explain",
+        headers={"X-Admin-Token": "test-admin-token"},
+    )
     assert openrouter.call_count == 1
 
 

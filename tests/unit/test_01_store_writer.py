@@ -185,6 +185,165 @@ async def test_canonical_sql_is_bound_parameter_not_string_interp() -> None:
     assert payload in params, "canonical_sql must be passed as a bind parameter"
 
 
+async def test_record_sample_skips_percentile_recompute_when_throttled() -> None:
+    """OPT-1: recompute_stats=False bumps totals via the cheap statement, no percentile_cont."""
+    from slowquery_demo.services.store import PostgresStoreWriter
+
+    pool, conn = _make_pool_mock()
+    transaction_ctx = AsyncMock()
+    transaction_ctx.__aenter__ = AsyncMock(return_value=None)
+    transaction_ctx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=transaction_ctx)
+
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+    await writer.record_sample("abc123", duration_ms=42.0, recompute_stats=False)
+
+    executed = [call.args[0] for call in conn.execute.await_args_list]
+    assert any("INSERT INTO query_samples" in s for s in executed)
+    # The bump path must not run the expensive percentile recompute.
+    assert not any("percentile_cont" in s for s in executed)
+    assert any(s.startswith("UPDATE query_fingerprints SET total_ms") for s in executed)
+
+
+async def test_record_sample_recompute_runs_percentiles() -> None:
+    """Default path still recomputes percentiles (dashboard freshness)."""
+    from slowquery_demo.services.store import PostgresStoreWriter
+
+    pool, conn = _make_pool_mock()
+    transaction_ctx = AsyncMock()
+    transaction_ctx.__aenter__ = AsyncMock(return_value=None)
+    transaction_ctx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=transaction_ctx)
+
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+    await writer.record_sample("abc123", duration_ms=42.0, recompute_stats=True)
+
+    executed = [call.args[0] for call in conn.execute.await_args_list]
+    assert any("percentile_cont" in s for s in executed)
+
+
+async def test_prune_samples_noop_for_nonpositive_retention() -> None:
+    """COST-1: retention <= 0 disables pruning without touching the pool."""
+    from slowquery_demo.services.store import PostgresStoreWriter
+
+    pool, conn = _make_pool_mock()
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+
+    await writer.prune_samples(0.0)
+    conn.execute.assert_not_awaited()
+
+
+async def test_prune_samples_deletes_old_rows() -> None:
+    """COST-1: a positive retention issues the DELETE with the retention arg."""
+    from slowquery_demo.services.store import PostgresStoreWriter
+
+    pool, conn = _make_pool_mock()
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+
+    await writer.prune_samples(3600.0)
+    conn.execute.assert_awaited_once()
+    sql = conn.execute.await_args.args[0]
+    assert "DELETE FROM query_samples" in sql
+    assert conn.execute.await_args.args[1] == 3600.0
+
+
+async def test_ensure_pool_builds_pool_only_once_under_concurrency() -> None:
+    """MEDIUM: concurrent first-callers must not each build (and leak) a pool."""
+    import asyncio
+
+    from slowquery_demo.services import store as store_mod
+    from slowquery_demo.services.store import PostgresStoreWriter
+
+    calls = {"n": 0}
+
+    async def _fake_create_pool(**_kwargs: object) -> object:
+        calls["n"] += 1
+        await asyncio.sleep(0)  # yield so both callers race inside the lock
+        return MagicMock(name="pool")
+
+    writer = PostgresStoreWriter(store_url="postgresql://localhost/x")
+    import unittest.mock
+
+    with unittest.mock.patch.object(
+        store_mod.asyncpg, "create_pool", new=AsyncMock(side_effect=_fake_create_pool)
+    ):
+        pools = await asyncio.gather(writer._ensure_pool(), writer._ensure_pool())
+
+    assert calls["n"] == 1, "pool built exactly once under concurrent first-callers"
+    assert pools[0] is pools[1]
+
+
+async def test_operations_after_close_raise_store_error() -> None:
+    """Spec 01 test 15: a hook call after ``close()`` raises ``StoreWriterError``."""
+    from slowquery_demo.services.store import PostgresStoreWriter, StoreWriterError
+
+    pool, _ = _make_pool_mock()
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+    await writer.close()
+
+    with pytest.raises(StoreWriterError, match="closed"):
+        await writer.upsert_fingerprint("abc", "SELECT 1")
+
+
+async def test_upsert_fingerprint_wraps_db_errors() -> None:
+    """Spec 01 invariant 4: a dead pool surfaces as a typed ``StoreWriterError``."""
+    from slowquery_demo.services.store import PostgresStoreWriter, StoreWriterError
+
+    pool, conn = _make_pool_mock()
+    conn.execute = AsyncMock(side_effect=RuntimeError("db gone"))
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+
+    with pytest.raises(StoreWriterError, match="upsert_fingerprint failed"):
+        await writer.upsert_fingerprint("abc", "SELECT 1")
+
+
+async def test_record_sample_wraps_db_errors() -> None:
+    """Spec 01 invariant 4: ``record_sample`` wraps the underlying asyncpg error."""
+    from slowquery_demo.services.store import PostgresStoreWriter, StoreWriterError
+
+    pool, conn = _make_pool_mock()
+    transaction_ctx = AsyncMock()
+    transaction_ctx.__aenter__ = AsyncMock(return_value=None)
+    transaction_ctx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=transaction_ctx)
+    conn.execute = AsyncMock(side_effect=RuntimeError("db gone"))
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+
+    with pytest.raises(StoreWriterError, match="record_sample failed"):
+        await writer.record_sample("abc", duration_ms=10.0)
+
+
+async def test_upsert_plan_wraps_db_errors() -> None:
+    """Spec 01 invariant 4: ``upsert_plan`` wraps the underlying asyncpg error."""
+    from slowquery_demo.services.store import PostgresStoreWriter, StoreWriterError
+
+    pool, conn = _make_pool_mock()
+    conn.execute = AsyncMock(side_effect=RuntimeError("db gone"))
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+
+    with pytest.raises(StoreWriterError, match="upsert_plan failed"):
+        await writer.upsert_plan("abc", plan_json={"x": 1}, plan_text="text", cost=1.0)
+
+
+async def test_insert_suggestions_wraps_db_errors() -> None:
+    """Spec 01 invariant 4: ``insert_suggestions`` wraps the underlying asyncpg error."""
+    from slowquery_detective.rules.base import Suggestion
+
+    from slowquery_demo.services.store import PostgresStoreWriter, StoreWriterError
+
+    pool, conn = _make_pool_mock()
+    conn.execute = AsyncMock(side_effect=RuntimeError("db gone"))
+    writer = PostgresStoreWriter(store_url="postgresql://x", pool=pool)
+
+    suggestions = [
+        Suggestion(
+            kind="index", sql="CREATE INDEX ...", rationale="r", confidence=0.9, source="rules"
+        ),
+    ]
+    with pytest.raises(StoreWriterError, match="insert_suggestions failed"):
+        await writer.insert_suggestions("abc", suggestions)
+
+
 def test_statements_constant_enumerates_all_sql() -> None:
     """Spec 01 test 20: grep guard — no ad-hoc SQL construction."""
     import inspect

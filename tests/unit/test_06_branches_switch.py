@@ -54,6 +54,23 @@ def test_no_ddl_payload_accepted(test_client) -> None:  # type: ignore[no-untype
     assert "sql" not in str(body_schema)
 
 
+def test_switch_returns_503_when_switcher_not_wired() -> None:
+    """Spec 06 negative-space: if the branch switcher was never wired onto
+    ``app.state`` the endpoint fails closed with 503, never a 500/AttributeError."""
+    from fastapi.testclient import TestClient
+
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    # Simulate a startup where the switcher was not installed.
+    if hasattr(app.state, "branch_switcher"):
+        del app.state.branch_switcher
+
+    with TestClient(app) as client:
+        resp = client.post("/branches/switch", json={"target": "fast"})
+    assert resp.status_code == 503
+
+
 def test_switch_to_fast_returns_200(test_client) -> None:  # type: ignore[no-untyped-def]
     """Spec 06 test 1."""
     resp = test_client.post("/branches/switch", json={"target": "fast"})

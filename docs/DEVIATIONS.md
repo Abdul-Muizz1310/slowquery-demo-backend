@@ -48,11 +48,11 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 ## 5. LLM fallback (`LLM_FALLBACK_ENABLED`) is off in production
 
 **Spec says:** "When the rules don't match, an LLM is asked 'explain why this plan is slow'".
-**Repo ships:** `LLM_FALLBACK_ENABLED=false` on the live Render service. The code path is wired (`core/observability._build_llm_config`, library passes the `LlmConfig` through), but the flag is off.
+**Repo ships:** `LLM_FALLBACK_ENABLED=false` — both in this doc **and** in [`render.yaml`](../render.yaml) (previously the blueprint set `"true"`, which contradicted this section and, because `_build_llm_config` raises `ConfigError` at boot when `OPENROUTER_API_KEY` is unset, was a live boot footgun). The two now agree: the flag is off. The code path is wired (`core/observability._build_llm_config`, library passes the `LlmConfig` through), but the flag is off.
 
 **Why:** the OpenRouter free-tier slug in the [memory pick](https://pypi.org/project/slowquery-detective/) is `nvidia/nemotron-nano-9b-v2:free` and I wanted to validate the rules-only path first before adding an LLM round-trip to the drainer's critical section. The LLM cascade (PRIMARY → FAST → FALLBACK) is well-tested in the library's own unit suite, but I haven't yet observed it live against real Neon data.
 
-**To close:** flip `LLM_FALLBACK_ENABLED=true` in Render env. If rules fire on a plan the drainer will skip the LLM entirely; if they don't, the drainer will call the library's `explain()` function and persist any resulting suggestion alongside rule-produced ones.
+**To close:** provision `OPENROUTER_API_KEY` (and `OPENROUTER_MODEL_PRIMARY`) in the Render dashboard **first**, then flip `LLM_FALLBACK_ENABLED=true` in `render.yaml` / Render env — enabling it without the key set will make the service fail fast at boot. If rules fire on a plan the drainer will skip the LLM entirely; if they don't, the drainer will call the library's `explain()` function and persist any resulting suggestion alongside rule-produced ones.
 
 ## 6. `render.yaml` `preDeployCommand` is silently ignored on Free tier
 
@@ -66,7 +66,7 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 ## 7. Integration lane is committed but Docker-gated
 
 **Spec implies:** full test matrix runs in CI.
-**Repo ships:** 73 unit tests run in CI on every push; 41 integration tests live under `tests/integration/` and are filtered out of the default run. They're committed and would work locally given a running Docker Desktop — the session-scoped `pg_container` fixture boots a Testcontainers Postgres, `alembic upgrade head` runs against it via subprocess to avoid event-loop collision with pytest-asyncio.
+**Repo ships:** 182 unit tests run in CI on every push; 49 integration tests live under `tests/integration/` and are filtered out of the default run. They're committed and would work locally given a running Docker Desktop — the session-scoped `pg_container` fixture boots a Testcontainers Postgres, `alembic upgrade head` runs against it via subprocess to avoid event-loop collision with pytest-asyncio.
 
 **Why:** Docker Desktop wasn't running on my dev laptop during S5a when the conftest landed. Adding a CI job that boots Docker-in-Docker is a separate line item.
 
@@ -82,6 +82,20 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 4. Rewrite `ExplainWorker._run_explain` to accept real captured parameters or integrate the bridge queue pattern from shim 4.
 
 **To close:** open PRs against the `slowquery-detective` repo. Until then, the shims stay in this repo's `core/observability.py` and are versioned alongside the library they patch.
+
+## 9. State-mutating endpoints are hardened for the public URL
+
+**Context:** `DEMO_MODE=true` bypasses the platform-token middleware for every route, so on the live URL the two endpoints with lasting cross-visitor side effects were unauthenticated. `POST /_slowquery/queries/{id}/force-explain` could overwrite a genuine captured EXPLAIN plan with a synthetic stub (permanent corruption), and `POST /branches/switch` could be spammed into repeated engine-rebuild churn against free-tier Neon/Render.
+
+**Repo ships (now):** both are gated in [`core/access.py`](../src/slowquery_demo/core/access.py), enforced *even under `DEMO_MODE`*:
+
+- A per-client cooldown (`DEMO_MUTATION_COOLDOWN_S`, seconds; `0` disables) throttles both endpoints and returns `429` inside the window.
+- `force-explain` (destructive) is **fail-closed**: with no `DEMO_MUTATION_TOKEN` configured it returns `403`, so an anonymous visitor can never clobber real data. With a token set it requires a matching `X-Admin-Token` header (constant-time compare).
+- `branches/switch` (transient churn, bounded by the cooldown) stays public by default so the demo punchline works, but is locked to the same admin token the moment `DEMO_MUTATION_TOKEN` is set.
+
+`render.yaml` ships `DEMO_MUTATION_COOLDOWN_S=3`; `DEMO_MUTATION_TOKEN` is left unset (`sync: false`) so `force-explain` is disabled until an operator provisions it in the Render dashboard.
+
+**Note vs. the audit's wording:** the fix is implemented as route-level dependencies rather than special-casing paths inside the token middleware — it achieves the same "require a secret for mutation even in demo mode" intent while keeping the middleware single-purpose.
 
 ---
 
