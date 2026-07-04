@@ -17,7 +17,7 @@ router = APIRouter(prefix="/order_items", tags=["order_items"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 ProductIdParam = Annotated[uuid.UUID, Query()]
-Limit = Annotated[int | None, Query()]
+Limit = Annotated[int | None, Query(ge=1, le=100)]
 
 
 @router.get("", response_model=PaginatedResponse[OrderItemDTO])

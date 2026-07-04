@@ -17,7 +17,7 @@ from slowquery_demo.services import order_service, user_service
 router = APIRouter(prefix="/users", tags=["users"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-Limit = Annotated[int | None, Query()]
+Limit = Annotated[int | None, Query(ge=1, le=100)]
 CursorParam = Annotated[str | None, Query()]
 
 

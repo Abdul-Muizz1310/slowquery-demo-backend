@@ -17,12 +17,13 @@ import collections.abc
 import json
 import re
 from datetime import UTC
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from slowquery_demo.core.access import enforce_cooldown, require_admin_token
 from slowquery_demo.core.database import get_db
 from slowquery_demo.repositories import slowquery_repository as repo
 from slowquery_demo.schemas.slowquery import (
@@ -128,12 +129,21 @@ async def get_query_detail(fingerprint_id: str, session: DbSession) -> Fingerpri
 # ---------------------------------------------------------------------------
 
 
-@router.post("/queries/{fingerprint_id}/force-explain")
+@router.post(
+    "/queries/{fingerprint_id}/force-explain",
+    dependencies=[Depends(enforce_cooldown), Depends(require_admin_token)],
+)
 async def force_explain(fingerprint_id: str, request: Request) -> dict[str, str]:
     """Force an EXPLAIN run + rules/LLM evaluation for a fingerprint.
 
     Used by the dashboard's "Re-analyze" button and exercised by
     integration test 05-9 to verify LLM is called when rules miss.
+
+    This endpoint writes a synthetic plan and can overwrite a genuine
+    captured plan, so it is gated fail-closed behind
+    :func:`require_admin_token`: with no ``DEMO_MUTATION_TOKEN``
+    configured it returns 403 even under ``DEMO_MODE``, and a per-client
+    cooldown throttles authorized callers.
     """
     if not _FINGERPRINT_ID_RE.match(fingerprint_id):
         raise HTTPException(status_code=404, detail="not found")
@@ -192,16 +202,29 @@ async def force_explain(fingerprint_id: str, request: Request) -> dict[str, str]
 _SSE_POLL_INTERVAL_S = 2.0
 
 
+async def _poll_fingerprints(request: Request) -> list[Any]:
+    """Read fingerprints using a short-lived session opened for this tick.
+
+    A long-lived SSE stream must not pin a pooled DB connection for its
+    whole lifetime — a handful of open dashboard tabs would exhaust the
+    pool and 503 everything, including ``/health``. Each poll opens a
+    fresh ``AsyncSession`` from the app's sessionmaker and releases it
+    (and its connection) before sleeping until the next tick.
+    """
+    factory = request.app.state.db_sessionmaker
+    async with factory() as session:
+        return await repo.list_fingerprints(session)
+
+
 async def _sse_generator(
     request: Request,
-    session: AsyncSession,
 ) -> collections.abc.AsyncGenerator[str, None]:
     """Polling-backed SSE generator.
 
     Emits ``tick`` events when a fingerprint's p95 changes, and
-    ``heartbeat`` events when nothing changed. Uses a single session
-    (resolved through ``get_db`` dependency injection so test overrides
-    apply) and re-queries the table on each poll tick.
+    ``heartbeat`` events when nothing changed. Acquires a session per
+    poll tick (see :func:`_poll_fingerprints`) instead of holding one
+    open for the whole connection.
     """
     from datetime import datetime
 
@@ -209,7 +232,7 @@ async def _sse_generator(
 
     # Emit an initial batch immediately so the client gets data before
     # the first poll interval elapses.
-    fps = await repo.list_fingerprints(session)
+    fps = await _poll_fingerprints(request)
     now_iso = datetime.now(UTC).isoformat()
     if fps:
         for fp in fps:
@@ -232,7 +255,7 @@ async def _sse_generator(
         if await request.is_disconnected():
             return
 
-        fps = await repo.list_fingerprints(session)
+        fps = await _poll_fingerprints(request)
         now_iso = datetime.now(UTC).isoformat()
         emitted = False
 
@@ -256,10 +279,10 @@ async def _sse_generator(
 
 
 @router.get("/api/stream")
-async def stream_fingerprints(request: Request, session: DbSession) -> StreamingResponse:
+async def stream_fingerprints(request: Request) -> StreamingResponse:
     """SSE endpoint consumed by the Phase 4c dashboard's LiveTimeline."""
     return StreamingResponse(
-        _sse_generator(request, session),
+        _sse_generator(request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

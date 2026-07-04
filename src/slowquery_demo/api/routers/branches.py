@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from slowquery_demo.core.access import enforce_cooldown, require_admin_token_if_configured
 from slowquery_demo.schemas.branches import SwitchBranchRequest, SwitchBranchResponse
 from slowquery_demo.services.branch_switcher import BranchSwitcher
 
@@ -19,7 +20,11 @@ def _get_switcher(request: Request) -> BranchSwitcher:
     return switcher  # type: ignore[no-any-return]
 
 
-@router.post("/switch", response_model=SwitchBranchResponse)
+@router.post(
+    "/switch",
+    response_model=SwitchBranchResponse,
+    dependencies=[Depends(enforce_cooldown), Depends(require_admin_token_if_configured)],
+)
 async def switch_branch(
     body: SwitchBranchRequest,
     request: Annotated[Request, None] = None,  # type: ignore[assignment]

@@ -16,7 +16,7 @@ from slowquery_demo.services import product_service
 router = APIRouter(prefix="/products", tags=["products"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-Limit = Annotated[int | None, Query()]
+Limit = Annotated[int | None, Query(ge=1, le=100)]
 
 
 @router.get("", response_model=PaginatedResponse[ProductDTO])
