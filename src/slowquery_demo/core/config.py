@@ -66,9 +66,15 @@ class Settings(BaseSettings):
     openrouter_model_fast: str = ""
     openrouter_model_fallback: str = ""
 
-    # --- Neon API (branch switching) ---
-    neon_api_key: str | None = None
-    neon_project_id: str | None = None
+    # NOTE: there are deliberately no NEON_API_KEY / NEON_PROJECT_ID fields.
+    # Branch switching never calls the Neon API — spec 06 rules that out
+    # explicitly ("calling out to the Neon API from an HTTP handler is a
+    # latency hazard and a secrets-leak hazard"). A switch is a pure
+    # URL + engine swap between DATABASE_URL and DATABASE_URL_FAST
+    # (services/branch_switcher.py + main._make_engine_builder). Those two
+    # settings used to be declared here and read by nothing, which advertised
+    # a mechanism that does not exist. ``extra="ignore"`` above means a stale
+    # NEON_* value left in an environment is simply ignored, not an error.
 
 
 def get_settings() -> Settings:

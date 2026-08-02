@@ -18,10 +18,10 @@ services:
         value: "1.0"
       - key: SLOWQUERY_STORE_URL
         sync: false
-      - key: NEON_API_KEY
-        sync: false
-      - key: NEON_PROJECT_ID
-        sync: false
+      # NOTE: no NEON_API_KEY / NEON_PROJECT_ID. Branch switching is a pure
+      # URL + engine swap between DATABASE_URL and DATABASE_URL_FAST (spec 06
+      # rules the Neon API out of the request path on purpose), so the service
+      # reads no Neon credentials at runtime.
       # Keep the LLM fallback OFF in production (matches DEVIATIONS §5).
       # When true, the app fails fast at boot unless OPENROUTER_API_KEY is
       # also set (see core/observability._build_llm_config), so flipping

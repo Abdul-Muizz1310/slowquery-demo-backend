@@ -139,6 +139,65 @@ async def test_buffer_cleared_after_successful_switch() -> None:
     assert switcher.active == "fast"
 
 
+# --- GET /branches/current (spec 06 tests 20-23) ------------------------
+
+
+def test_current_branch_defaults_to_slow(test_client) -> None:  # type: ignore[no-untyped-def]
+    """Spec 06 test 20."""
+    resp = test_client.get("/branches/current")
+    assert resp.status_code == 200
+    assert resp.json() == {"active": "slow"}
+
+
+def test_current_branch_reflects_a_completed_switch(test_client) -> None:  # type: ignore[no-untyped-def]
+    """Spec 06 test 21."""
+    assert test_client.post("/branches/switch", json={"target": "fast"}).status_code == 200
+
+    resp = test_client.get("/branches/current")
+    assert resp.status_code == 200
+    assert resp.json() == {"active": "fast"}
+
+
+def test_current_branch_is_not_throttled_by_the_mutation_cooldown(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
+    """Spec 06 test 22: the read-only companion is pollable.
+
+    With a positive ``DEMO_MUTATION_COOLDOWN_S`` a second *mutation* inside
+    the window is 429'd. ``GET /branches/current`` must be exempt, so a
+    dashboard can poll it once a second without being rate-limited.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("DEMO_MUTATION_COOLDOWN_S", "30")
+
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    assert app.state.settings.demo_mutation_cooldown_s == 30.0
+
+    with TestClient(app) as client:
+        for _ in range(3):
+            resp = client.get("/branches/current")
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["active"] == "slow"
+
+
+def test_current_branch_returns_503_when_switcher_not_wired() -> None:
+    """Spec 06 test 23: fails closed, never a 500/AttributeError."""
+    from fastapi.testclient import TestClient
+
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    if hasattr(app.state, "branch_switcher"):
+        del app.state.branch_switcher
+
+    with TestClient(app) as client:
+        resp = client.get("/branches/current")
+    assert resp.status_code == 503
+
+
 def test_engine_builder_failure_leaves_buffer_intact() -> None:
     """A failed switch must not clear the buffer (old branch stays live)."""
     import asyncio

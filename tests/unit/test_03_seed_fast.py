@@ -10,14 +10,21 @@ import pytest
 SEED_FAST = Path(__file__).resolve().parents[2] / "scripts" / "seed_fast.py"
 
 
-def test_seed_fast_imports_helpers_from_seed_common() -> None:
-    """Spec 03 test 1."""
-    assert SEED_FAST.exists(), "seed_fast.py must be committed in S4"
-    body = SEED_FAST.read_text(encoding="utf-8")
-    assert "from scripts._seed_common import" in body or "from ._seed_common" in body
-    # And doesn't redefine them.
+def test_seed_fast_reuses_the_shared_row_builders() -> None:
+    """Spec 03 test 1: the row builders are *the same objects* as seed_slow's.
+
+    Spec 03 invariant 5 (identical row identities across both branches) only
+    holds if both scripts share one deterministic generator. Asserting object
+    identity proves reuse; the earlier version grepped the source for an import
+    line and a missing ``def``, which a copy-pasted lambda or a re-export would
+    have satisfied without actually sharing the implementation.
+    """
+    from scripts import _seed_common, seed_fast, seed_slow
+
     for name in ("build_user_rows", "build_order_rows", "build_order_item_rows"):
-        assert f"def {name}" not in body, f"{name} must not be redefined in seed_fast.py"
+        shared = getattr(_seed_common, name)
+        assert getattr(seed_fast, name, shared) is shared, f"seed_fast redefines {name}"
+        assert getattr(seed_slow, name, shared) is shared, f"seed_slow redefines {name}"
 
 
 def test_parse_args_matches_seed_slow_shape() -> None:

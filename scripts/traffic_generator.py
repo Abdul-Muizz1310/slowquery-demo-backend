@@ -6,8 +6,12 @@ hourly schedule (60 seconds per burst) so dashboards stay alive
 even when the demo is sleeping between visitors.
 
 The generator never hits platform / slowquery / branches endpoints —
-it produces realistic commerce traffic and nothing else. Spec 07
-grep self-tests pin that contract.
+it produces realistic commerce traffic and nothing else. That contract
+is pinned by driving this module's real request loop under ``respx``
+(``tests/unit/test_07_traffic_generator.py``), not by grepping the source.
+
+Spec 07 specifies a Locust driver; this is an httpx one. The divergence
+(and what it costs) is recorded in ``docs/DEVIATIONS.md`` §10.
 """
 
 from __future__ import annotations
@@ -85,10 +89,9 @@ def parse_args(argv: list[str] | None = None) -> TrafficArgs:
 def exit_code_for_stats(stats: TrafficStats) -> int:
     """Return 0 on healthy stats, 1 otherwise.
 
-    ``stats`` is a :class:`TrafficStats` with attributes populated by
-    the locust-like driver (or a fake in tests). Unit tests supply
-    instances directly to verify the threshold logic without spinning
-    up httpx.
+    ``stats`` is a :class:`TrafficStats` populated by :func:`_run_driver`
+    (or constructed directly in tests). Unit tests supply instances
+    directly to verify the threshold logic without spinning up httpx.
     """
     if stats.total == 0:
         return 1
@@ -155,9 +158,9 @@ async def _run_task(
     """Dispatch one task against the commerce endpoints only.
 
     Platform probes, observability routes, and the branch toggle are
-    deliberately out of scope. Spec 07 test 3 is a grep self-test
-    that fails the build if any forbidden path string appears in
-    this module.
+    deliberately out of scope (spec 07 invariant 1). Spec 07 test 3 runs
+    the driver under ``respx`` and fails the build if any request the loop
+    actually issues lands on one of those routes.
     """
     fallback_user = str(uuid.uuid4())
     fallback_product = str(uuid.uuid4())
@@ -204,12 +207,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     return code
-
-
-# Spec 07 test 14: grep for "--headless" / "headless=True" — neither is
-# meaningful here since this driver is httpx-based, not Locust. Include
-# the literal so the grep passes without changing behaviour.
-_GREP_MARKER_HEADLESS = "--headless"
 
 
 if __name__ == "__main__":

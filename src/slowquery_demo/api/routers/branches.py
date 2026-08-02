@@ -1,4 +1,10 @@
-"""``POST /branches/switch`` — swap the active Neon branch."""
+"""The ``/branches`` routes.
+
+- ``POST /branches/switch`` — swap the active Neon branch (mutating: cooldown
+  + admin token when configured).
+- ``GET /branches/current`` — read the active branch (side-effect free, so no
+  cooldown and no token; a dashboard polls it).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from slowquery_demo.core.access import enforce_cooldown, require_admin_token_if_configured
-from slowquery_demo.schemas.branches import SwitchBranchRequest, SwitchBranchResponse
+from slowquery_demo.schemas.branches import (
+    CurrentBranchResponse,
+    SwitchBranchRequest,
+    SwitchBranchResponse,
+)
 from slowquery_demo.services.branch_switcher import BranchSwitcher
 
 router = APIRouter(prefix="/branches", tags=["branches"])
@@ -37,3 +47,15 @@ async def switch_branch(
     return SwitchBranchResponse(
         active=switcher.active, switched_at=switched_at, latency_ms=latency_ms
     )
+
+
+@router.get("/current", response_model=CurrentBranchResponse)
+async def current_branch(request: Request) -> CurrentBranchResponse:
+    """Return the currently-active branch.
+
+    Read-only companion to ``POST /branches/switch``: no cooldown, no admin
+    token, no side effects. Reads the same ``BranchSwitcher.active`` value a
+    successful switch returns, so the two can never disagree.
+    """
+    switcher = _get_switcher(request)
+    return CurrentBranchResponse(active=switcher.active)

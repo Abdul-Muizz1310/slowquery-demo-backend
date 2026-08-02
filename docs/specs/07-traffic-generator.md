@@ -1,5 +1,12 @@
 # Spec 07 — Traffic generator
 
+> **Implementation diverges from this spec.** Everything below specifies a **Locust** driver. What ships is
+> a single-file **httpx** driver with the flags `--host / --duration / --users / --json` — no `locust`
+> dependency, no `HttpUser`, no `--headless`, no `--no-web`, and none of the `TRAFFIC_*` env vars. The spec
+> is kept as the record of what was promised; the divergence, its cost, and the two ways to close it are in
+> [DEVIATIONS §10](../DEVIATIONS.md). Read the Locust-specific parts below (deliverable, invariant 2,
+> test 14) as *not implemented as written*.
+
 ## Goal
 
 Produce a continuous stream of realistic HTTP traffic against the deployed demo service so that when someone opens the dashboard cold, there are already fingerprints, rolling p95 stats, explain plans, and suggestions to look at. The generator also has to produce the specific query shapes the rules engine is designed to catch: seq scans on `orders.user_id`, seq scans on `order_items.{order_id,product_id}`, an `ORDER BY created_at` without a composite index, and an N+1 pattern (many `/users/{id}/orders` calls in a short burst). Without this the demo is a museum piece — the first person to load it sees an empty dashboard.

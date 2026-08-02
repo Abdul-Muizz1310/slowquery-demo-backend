@@ -9,8 +9,13 @@ repositories/   →   async SQLAlchemy select()/text() — the ONLY layer that i
 models/         →   SQLAlchemy 2.0 DeclarativeBase ORM classes
 schemas/        →   Pydantic v2 DTOs + PaginatedResponse[T]
 core/           →   config (Settings), database (engine + session factory),
-                     errors (DomainError + exception handlers), observability
-                     (the four library shims + drainer), platform (health, CORS)
+                     db_config (asyncpg URL normalisation), branch_state
+                     (.branch_state persistence), access (mutation cooldown +
+                     admin-token gates), errors (DomainError + exception
+                     handlers), observability (the four library shims, the
+                     self-instrumentation ignore list, and the drainer),
+                     platform (health, version, metrics, CORS), platform_token
+                     (X-Platform-Token verification)
 ```
 
 Controllers never touch the DB. Models never know about HTTP. Pure core, imperative shell.
@@ -92,7 +97,7 @@ flowchart LR
     end
 
     subgraph fast["Fast branch (indexed)"]
-        F_Tables["Same 8 tables +<br/>3 B-tree indexes<br/>via seed_fast.py"]
+        F_Tables["Same 8 tables +<br/>4 B-tree indexes<br/>via seed_fast.py"]
         F_Query["SELECT ... WHERE user_id = ?"]
         F_Plan["Index Scan<br/>p95 well below threshold"]
         F_None["No rules fire<br/>no suggestions"]
@@ -133,30 +138,40 @@ erDiagram
         int unit_price_cents
     }
     query_fingerprints {
-        string fingerprint_id PK
-        text canonical_sql
+        string id PK
+        text fingerprint
         timestamp first_seen
         timestamp last_seen
+        bigint call_count
+        bigint total_ms
+        numeric p50_ms
+        numeric p95_ms
+        numeric p99_ms
+        numeric max_ms
     }
     query_samples {
-        uuid id PK
+        bigint id PK
         string fingerprint_id FK
-        float duration_ms
-        timestamp recorded_at
+        jsonb params
+        numeric duration_ms
+        int rows
+        timestamp sampled_at
     }
     explain_plans {
-        uuid id PK
-        string fingerprint_id FK
+        string fingerprint_id PK
         jsonb plan_json
-        timestamp created_at
+        text plan_text
+        numeric cost
+        timestamp captured_at
     }
     suggestions {
-        uuid id PK
+        bigint id PK
         string fingerprint_id FK
-        text rule_name
-        text message
+        text kind
         text sql
-        float confidence
+        text source
+        text rationale
+        timestamp applied_at
     }
 
     users ||--o{ orders : "places"
@@ -167,7 +182,19 @@ erDiagram
     query_fingerprints ||--o{ suggestions : "produces"
 ```
 
-The first four tables are the commerce domain (seeded with fake data). The last four are the `slowquery-detective` bookkeeping tables, written by `PostgresStoreWriter`. A no-index guard test greps the migration file and fails CI if any future change adds an index on the three demo-critical columns (`orders.user_id`, `order_items.order_id`, `order_items.product_id`).
+The first four tables are the commerce domain (seeded with fake data). The last four are the `slowquery-detective` bookkeeping tables, written by `PostgresStoreWriter`; the bookkeeping columns above are the ones [`models/slowquery_store.py`](../src/slowquery_demo/models/slowquery_store.py) declares and [`schemas/slowquery.py`](../src/slowquery_demo/schemas/slowquery.py) serialises — the diagram is diffable against the models, not a sketch.
+
+### Deliberate source-text guard tests
+
+Three unit tests assert on *file contents* rather than behaviour. They are the exception, not the pattern, and each guards a negative that has no runtime surface to observe (the absence of DDL cannot be asserted from an API response):
+
+| Test | Guards |
+|---|---|
+| [`test_00_schema.py::test_migration_does_not_create_forbidden_indexes`](../tests/unit/test_00_schema.py) | the Alembic migration never adds an index on `orders.user_id`, `order_items.order_id` or `order_items.product_id` — the demo's slow branch depends on their absence |
+| [`test_02_seed_slow.py::test_script_body_has_no_create_index_statement`](../tests/unit/test_02_seed_slow.py) | `seed_slow.py` never issues `CREATE INDEX` |
+| [`test_03_seed_fast.py::test_create_index_appears_only_in_fast_indexes_constant`](../tests/unit/test_03_seed_fast.py) | every `CREATE INDEX` in `seed_fast.py` is a reviewed entry of the `FAST_INDEXES` tuple — no stray index escapes PR review |
+
+Everything else asserts behaviour. The traffic generator's endpoint-scope tests used to grep its source too (and one of them was satisfied by a dead `_GREP_MARKER_HEADLESS` constant planted for that purpose); they now drive the real request loop under `respx` — see [DEVIATIONS §10](DEVIATIONS.md).
 
 ## Two Neon branches
 
@@ -193,12 +220,20 @@ The branch-switch code path rebuilds the SQLAlchemy engine at runtime: it builds
 | `/health` | Liveness probe (platform middleware) | -- |
 | `/version` | Build identity | -- |
 | `/_slowquery/queries` | Dashboard API -- returns the fingerprint list | -- |
+| `/_slowquery/queries/{id}` | One fingerprint: plan, samples, suggestions | -- |
+| `/_slowquery/queries/{id}/force-explain` | Re-analyze (admin-token gated, fail-closed) | -- |
+| `/_slowquery/api/stream` | SSE -- live p95 ticks + heartbeats | -- |
 | `/users`, `/products` | Fast reads (unique indexes on email / sku) | -- |
 | `/orders?limit=N` | Recent orders, `ORDER BY created_at DESC` | **sort_without_index** rule |
 | `/users/{id}/orders` | Orders for one user | Seq Scan on `orders.user_id` |
 | `/orders/{id}` | Order + its items (join to `order_items`) | Seq Scan on `order_items.order_id` |
 | `/order_items?product_id=...` | Items for one product | Seq Scan on `order_items.product_id` |
-| `/branches/switch` | Swap active branch state (full engine rebuild deferred) | -- |
+| `/branches/switch` | Swap the active branch: rebuilds + swaps the `AsyncEngine`, clears the buffer, re-attaches the hooks (cooldown-throttled) | -- |
+| `/branches/current` | Read the active branch (read-only, ungated) | -- |
+
+The `/branches/switch` row used to read "full engine rebuild deferred". That is stale: the rebuild ships (see the paragraph above and [DEVIATIONS §3](DEVIATIONS.md)). The one part still deferred is repointing the drainer's EXPLAIN pool at the new branch.
+
+Queries the observability pipeline issues against its own bookkeeping tables, plus `/health`'s `SELECT 1`, are filtered out of capture by `observability.should_ignore_statement` (spec 05 invariants 5-6) — otherwise the dashboard's own reads accumulate `total_ms` and climb to the top of `/_slowquery/queries`, burying the commerce slow queries the demo exists to show.
 
 ## The four library compatibility shims
 
@@ -208,6 +243,8 @@ See [`core/observability.py`](../src/slowquery_demo/core/observability.py) for t
 2. `StoreWriter` swapped at import time via `setattr(_sqd_middleware, "StoreWriter", PostgresStoreWriter)`.
 3. `cursor.info[_KEY]` -> `setattr(context, _KEY, ...)` in the hook (async cursors and asyncpg contexts both lack `.info`).
 4. Sync-hook to async-store bridge + direct EXPLAIN using real captured statement + parameters, skipping the library's broken `synthesize_params`.
+
+The patched hook also owns the self-instrumentation filter (`should_ignore_statement`): the library's `install()` has no ignore-list parameter, so spec 05 invariants 5-6 are enforced here, in the `after_cursor_execute` listener, before either recording sink.
 
 ## Migration path
 

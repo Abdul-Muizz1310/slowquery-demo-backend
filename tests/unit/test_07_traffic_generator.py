@@ -1,13 +1,53 @@
-"""S3 red: unit tests for spec 07 (traffic generator)."""
+"""S3 red: unit tests for spec 07 (traffic generator).
+
+The endpoint-scope invariants (spec 07 invariants 1-2, tests 3 / 12 / 13 / 14)
+are asserted against the **composed driver flow** — ``_run_driver`` is executed
+end to end with ``respx`` intercepting httpx — not by grepping the script's
+source text. The earlier source-grep versions were satisfiable by a literal
+anywhere in the file (and test 14 was satisfied by a dead
+``_GREP_MARKER_HEADLESS = "--headless"`` constant planted in the script for
+exactly that purpose), so they could pass while the driver did the wrong thing.
+"""
 
 from __future__ import annotations
 
 import random
 from pathlib import Path
 
+import httpx
 import pytest
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "traffic_generator.py"
+
+# Spec 07 invariant 1: platform probes, observability routes and the branch
+# toggle are all out of scope for generated traffic.
+FORBIDDEN_PREFIXES = ("/health", "/version", "/metrics", "/_slowquery", "/branches")
+
+_DRIVER_HOST = "http://demo.test"
+
+# ``_run_driver`` prefetches ``/users?limit=20`` and ``/products?limit=20`` once
+# before the task loop; neither is counted in ``TrafficStats.total``.
+_PREFETCH_REQUESTS = 2
+
+
+async def _drive_and_record(respx_mock, **overrides):  # type: ignore[no-untyped-def]
+    """Run the real driver loop against a mocked host; return the calls made.
+
+    Executes ``_run_driver`` — the same coroutine ``main()`` runs — so the
+    assertions cover the composed task-dispatch flow rather than a helper in
+    isolation.
+    """
+    from scripts.traffic_generator import TrafficArgs, _run_driver
+
+    respx_mock.route(host="demo.test").mock(
+        return_value=httpx.Response(
+            200, json={"items": [{"id": "3f1d8e2a-0000-4000-8000-000000000001"}]}
+        )
+    )
+    kwargs = {"host": _DRIVER_HOST, "duration": 1, "users": 50, "json": False}
+    kwargs.update(overrides)
+    stats = await _run_driver(TrafficArgs(**kwargs))  # type: ignore[arg-type]
+    return stats, [call.request for call in respx_mock.calls]
 
 
 def test_weighted_choice_distribution() -> None:
@@ -38,13 +78,19 @@ def test_parse_args_defaults_and_override() -> None:
     assert override.json is True
 
 
-def test_tasks_do_not_hit_platform_endpoints() -> None:
-    """Spec 07 test 3."""
-    assert SCRIPT_PATH.exists(), "traffic_generator.py must be committed in S4"
-    body = SCRIPT_PATH.read_text(encoding="utf-8")
-    forbidden = ("/health", "/version", "/_slowquery", "/branches/switch")
-    for path in forbidden:
-        assert path not in body, f"traffic generator must not hit {path}"
+async def test_tasks_do_not_hit_platform_endpoints(respx_mock) -> None:  # type: ignore[no-untyped-def]
+    """Spec 07 test 3 / invariant 1: generated traffic is commerce-only.
+
+    Asserted on the requests the driver actually issues, so a task that
+    started probing ``/health`` would fail here even if the literal never
+    appeared in the script's source text.
+    """
+    stats, requests = await _drive_and_record(respx_mock)
+
+    assert stats.total > 0, "the driver must actually issue traffic"
+    assert requests
+    offenders = [str(r.url) for r in requests if r.url.path.startswith(FORBIDDEN_PREFIXES)]
+    assert offenders == [], f"traffic generator must not hit platform routes: {offenders}"
 
 
 @pytest.mark.slow
@@ -98,20 +144,56 @@ def test_empty_seed_data_still_runs_with_fallback_ids() -> None:
     assert exit_code in (0, 1)
 
 
-def test_branches_switch_path_absent_in_script_body() -> None:
-    """Spec 07 test 12."""
-    body = SCRIPT_PATH.read_text(encoding="utf-8")
-    assert "/branches/switch" not in body
+async def test_driver_never_switches_branches(respx_mock) -> None:  # type: ignore[no-untyped-def]
+    """Spec 07 test 12: the generator issues no state-mutating request.
+
+    Every request must be a ``GET``, and none may target ``/branches/switch``.
+    A read-only driver cannot flip the demo out from under a viewer.
+    """
+    _stats, requests = await _drive_and_record(respx_mock)
+
+    assert requests
+    assert {r.method for r in requests} == {"GET"}
+    assert [str(r.url) for r in requests if r.url.path == "/branches/switch"] == []
 
 
-def test_no_platform_token_header_sent() -> None:
-    """Spec 07 test 13."""
-    body = SCRIPT_PATH.read_text(encoding="utf-8")
-    assert "X-Platform-Token" not in body
-    assert "x-platform-token" not in body
+async def test_no_platform_token_header_sent(respx_mock) -> None:  # type: ignore[no-untyped-def]
+    """Spec 07 test 13: the generator relies on DEMO_MODE, never on a token.
+
+    Asserted on the wire, so a header added by a future client tweak (default
+    headers, an auth hook) is caught even though the literal string would not
+    appear in this module.
+    """
+    _stats, requests = await _drive_and_record(respx_mock)
+
+    assert requests
+    for request in requests:
+        header_names = {name.lower() for name in request.headers}
+        assert "x-platform-token" not in header_names
 
 
-def test_script_runs_headless_no_web_ui() -> None:
-    """Spec 07 test 14."""
-    body = SCRIPT_PATH.read_text(encoding="utf-8")
-    assert "--headless" in body or "headless=True" in body
+async def test_driver_is_headless_and_terminates_at_its_deadline(  # type: ignore[no-untyped-def]
+    respx_mock,
+) -> None:
+    """Spec 07 test 14 (httpx equivalent of Locust's ``--headless`` / ``--no-web``).
+
+    This driver is httpx-based, not Locust (see DEVIATIONS §10), so there is no
+    web UI or stats-upload endpoint to switch off: headless is the *only* mode.
+    The behaviour that matters is therefore twofold — no web-UI/stats flag is
+    accepted, and the run terminates on its own at the ``--duration`` deadline
+    instead of looping forever (invariant 2).
+    """
+    from scripts.traffic_generator import parse_args
+
+    for flag in ("--headless", "--no-web", "--web-host", "--web-port"):
+        with pytest.raises(SystemExit):
+            parse_args([flag])
+
+    stats, requests = await _drive_and_record(respx_mock, duration=1)
+
+    # Returning at all proves the deadline terminated the loop rather than the
+    # test timing out. Each completed task counts once in ``stats.total`` while
+    # issuing one or more requests, on top of the two prefetch calls.
+    assert stats.total > 0
+    assert len(requests) >= stats.total + _PREFETCH_REQUESTS
+    assert stats.p95_ms >= 0.0

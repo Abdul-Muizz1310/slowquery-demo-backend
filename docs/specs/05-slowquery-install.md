@@ -44,7 +44,7 @@ The `install` call is the library's public API — not patched, not wrapped. Any
 3. `LLM_FALLBACK_ENABLED=false` means the middleware runs rules-only and never issues an HTTP request to OpenRouter. Verified by running the integration tests with `LLM_FALLBACK_ENABLED=false` and confirming `respx` (as a safety net) records zero outbound requests to `openrouter.ai`.
 4. When `LLM_FALLBACK_ENABLED=true`, the `LlmConfig` is built from the workspace's OpenRouter settings (the free-tier slugs in `project_openrouter_models.md`). The config is not constructed if the feature is disabled, so missing OpenRouter env vars are a non-issue when LLM is off.
 5. `/health` does **not** go through the slowquery middleware — or if it does, its query (if any) is filtered out by the middleware's internal ignore list. We don't want platform probes polluting the fingerprint table.
-6. `/version` and `/_slowquery/*` endpoints are also filtered from capture for the same reason.
+6. `/version` and `/_slowquery/*` endpoints are also filtered from capture for the same reason. Concretely: the observability system must never fingerprint its **own** bookkeeping reads. The dashboard read API (`/_slowquery/queries`, `/_slowquery/queries/{id}`, the SSE poller) selects from `query_fingerprints`, `query_samples`, `explain_plans` and `suggestions` through the *instrumented* engine, so without an ignore list the pipeline observes itself and the headline fingerprint list is dominated by its own bookkeeping traffic instead of the seeded commerce slow queries. The filter is a statement-level predicate applied in the `after_cursor_execute` hook, before the rolling buffer and before the bridge queue, so an ignored statement produces neither a percentile sample nor a `query_fingerprints` row.
 7. The `PostgresStoreWriter` is stopped gracefully in a FastAPI shutdown event handler (`app.on_event("shutdown")`).
 
 ## Test cases
@@ -68,6 +68,13 @@ The `install` call is the library's public API — not patched, not wrapped. Any
 12. `SLOWQUERY_SAMPLE_RATE=1.5` is rejected by Pydantic settings validation (must be in [0, 1]).
 13. `LLM_FALLBACK_ENABLED=true` with `OPENROUTER_API_KEY` unset raises `ConfigError` at startup with a clear message pointing at the missing env var.
 14. `install_slowquery` being called before the engine is ready raises a typed `ConfigError`, not an `AttributeError`.
+
+**Success (unit — the statement ignore list, invariants 5-6):**
+18. `should_ignore_statement` returns `True` for a `SELECT` against each of the four bookkeeping tables (`query_fingerprints`, `query_samples`, `explain_plans`, `suggestions`) — including the exact statements the dashboard read API emits.
+19. `should_ignore_statement` returns `True` for the `/health` readiness probe statement (`SELECT 1`) in any whitespace / trailing-semicolon / mixed-case form, and for a blank statement.
+20. `should_ignore_statement` returns `False` for the seeded commerce statements the demo exists to surface (`orders … ORDER BY created_at`, `orders WHERE user_id = $1`, `order_items WHERE product_id = $1`).
+21. `should_ignore_statement` does not over-match: a commerce statement whose text merely *contains* a bookkeeping word as a substring (e.g. a `suggestions_count` column, or `SELECT 100`) is still recorded.
+22. The `after_cursor_execute` hook records neither a rolling-buffer sample nor a bridge-queue item for an ignored statement, and records both for a commerce statement.
 
 **Security / destructive-guard:**
 15. The dashboard router is mounted at `/_slowquery`, not the root. A test asserts that none of the library's endpoints are visible at top-level paths (e.g. `/queries` returns 404, not a list).

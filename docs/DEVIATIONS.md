@@ -66,7 +66,7 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 ## 7. Integration lane is committed but Docker-gated
 
 **Spec implies:** full test matrix runs in CI.
-**Repo ships:** 182 unit tests run in CI on every push; 49 integration tests live under `tests/integration/` and are filtered out of the default run. They're committed and would work locally given a running Docker Desktop — the session-scoped `pg_container` fixture boots a Testcontainers Postgres, `alembic upgrade head` runs against it via subprocess to avoid event-loop collision with pytest-asyncio.
+**Repo ships:** 221 unit tests run in CI on every push; 49 integration tests live under `tests/integration/` and are filtered out of the default run. They're committed and would work locally given a running Docker Desktop — the session-scoped `pg_container` fixture boots a Testcontainers Postgres, `alembic upgrade head` runs against it via subprocess to avoid event-loop collision with pytest-asyncio.
 
 **Why:** Docker Desktop wasn't running on my dev laptop during S5a when the conftest landed. Adding a CI job that boots Docker-in-Docker is a separate line item.
 
@@ -97,14 +97,44 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 
 **Note vs. the audit's wording:** the fix is implemented as route-level dependencies rather than special-casing paths inside the token middleware — it achieves the same "require a secret for mutation even in demo mode" intent while keeping the middleware single-purpose.
 
+## 10. Traffic generator is httpx-based, not a Locust file
+
+**Spec says** ([`docs/specs/07-traffic-generator.md`](specs/07-traffic-generator.md)): the deliverable is "a Locust file (`from locust import HttpUser, task, between`) plus a thin `__main__` that runs it headless against a configurable `--host`" (spec 07 line 9), the generator "runs headless (`--headless`)" (invariant 2), stdout is "metrics from Locust" (line 11), and "Locust's stats upload endpoints are disabled (`--no-web` is implied by `--headless`)" (test 14).
+
+**Repo ships:** [`scripts/traffic_generator.py`](../scripts/traffic_generator.py) is a single-file **httpx** driver. `locust` is not a dependency (`grep -rn locust src/ scripts/` finds no import) and there is no `HttpUser` / `@task` class. The CLI is `--host`, `--duration`, `--users`, `--json` — there is no `--headless`, no `--no-web`, no `--spawn-rate`, and the env vars the spec names (`TARGET_URL`, `TRAFFIC_DURATION_SECONDS`, `TRAFFIC_USERS`, `TRAFFIC_SPAWN_RATE`) are not read; `--host` defaults to `http://localhost:8000` in code. Output under `--json` is one line from this repo, not Locust: `{"total", "failures", "p95_ms", "exit_code"}`.
+
+**Why:** the whole generator is ~200 lines of `asyncio` + `httpx`, and `httpx` is already a runtime dependency (the app ships it). Adding Locust would add a heavyweight test-only dependency, a gevent-based worker model that fights `asyncio`, and a web UI whose only role would be to be switched off. Spec invariant 4's health-signal contract (exit non-zero when p95 > 30 000 ms or failure rate > 20 %) is what actually matters for the Render cron worker, and `exit_code_for_stats` implements it directly.
+
+**What this cost:** spec 07's Locust-specific invariants have no implementation to point at. Test 14 (`--no-web` implied by `--headless`) was for a while satisfied by a dead `_GREP_MARKER_HEADLESS = "--headless"` constant planted in the script purely so a source-grep assertion would pass — a test asserting a literal instead of behaviour. Both the constant and the grep assertions are gone: spec 07 tests 3 / 12 / 13 / 14 now drive `_run_driver` under `respx` and assert on the requests the loop actually issues (commerce paths only, `GET` only, no `X-Platform-Token`, terminates at the `--duration` deadline). "Headless" is not a mode here — it is the only mode, since there is no web UI to disable.
+
+**To close:** either rewrite the script as a real Locust file and keep the spec, or rewrite spec 07 around the httpx driver (weights, `--json` shape, exit-code contract) and drop the Locust language. The second is the honest option; it is not done yet because the spec doubles as the record of what was originally promised.
+
+## 11. There is no CI deploy job — Render auto-deploys `main` itself
+
+**Docs used to say:** "Render free tier with auto-deploy via CI webhook", "auto-deploy via deploy-hook webhook from CI", a CI graph of "lint → test → build → deploy", and a setup step reading `gh secret set RENDER_DEPLOY_HOOK --body '<url>'`.
+
+**Reality:** the deploy job was deleted (`ci: drop stale Render deploy-hook job — the service auto-deploys main on push`). [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) has `lint → test → build → smoke`; no job calls a Render hook, and no `RENDER_DEPLOY_HOOK` secret is required or read anywhere in the repo. Deploys happen because Render's own GitHub integration watches `main` — pushing is the deploy.
+
+**Why the hook went away:** it was a second, independent trigger for the same deploy. Two paths to production means a green CI run could report "deployed" while Render had already deployed the same commit itself, or (worse) fire a rebuild of a commit whose tests had not finished. Render's native auto-deploy is the single trigger.
+
+**What replaced the verification the hook implied:** a `smoke` job (spec 12) that polls the deployed `/health` after the build. It is **env-gated**: with the `SMOKE_BASE_URL` repository variable unset it prints a skip line, makes zero HTTP requests, and exits `0`, so a fork PR or a sleeping / suspended free-tier service cannot fail CI for a reason unrelated to the diff.
+
+**To close:** nothing — this is the intended shape. The deviation is recorded because five README sites and one doc site described the deleted pipeline as if it still existed.
+
 ---
 
 ## Deviations explicitly accepted for v0.1.0
 
 These are intentional scope cuts that won't be closed in this repo:
 
-- **No live SSE endpoint for the dashboard.** `/_slowquery/queries` returns an empty list right now (my local stub) because the library's `dashboard_router` is a lazy stub. Phase 4c (dashboard frontend) will either read the bookkeeping tables directly or I'll upstream a real router to the library.
 - **No separate `slowquery-store` Neon branch.** Bookkeeping tables live on the same branch as the commerce data. The spec hinted at an "admin" branch but the complexity wasn't worth it for a portfolio demo.
 - **No EXPLAIN ANALYZE — just EXPLAIN.** The drainer runs `EXPLAIN (FORMAT JSON)` without `ANALYZE` to avoid double-executing the query. `ANALYZE` would add real timings to the plan; without it we get estimated rows and costs which is enough for the rules engine.
+
+### Withdrawn from this list (they shipped)
+
+Two bullets that used to live above are no longer true and have been removed rather than left to rot:
+
+- ~~"No live SSE endpoint for the dashboard."~~ `GET /_slowquery/api/stream` ships — [`api/routers/dashboard.py`](../src/slowquery_demo/api/routers/dashboard.py) `stream_fingerprints` / `_sse_generator`, spec 09.
+- ~~"`/_slowquery/queries` returns an empty list right now (my local stub) because the library's `dashboard_router` is a lazy stub."~~ The demo owns a real read API: `GET /_slowquery/queries`, `GET /_slowquery/queries/{id}` and `POST /_slowquery/queries/{id}/force-explain` read the bookkeeping tables through [`repositories/slowquery_repository.py`](../src/slowquery_demo/repositories/slowquery_repository.py), and `install_slowquery` mounts *that* router at `/_slowquery` instead of the library's stub. Spec 08.
 
 See [`docs/projects/50-slowquery-detective.md`](https://github.com/Abdul-Muizz1310/slowquery-detective/blob/main/docs/projects/50-slowquery-detective.md) for the authoritative spec.

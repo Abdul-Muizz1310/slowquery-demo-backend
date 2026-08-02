@@ -12,6 +12,12 @@ Expose a single endpoint that flips the demo service's active Neon branch betwee
 - **Response (409):** target is already the active branch (no-op refused, not silently acknowledged — we want the dashboard to know).
 - **Response (503):** new pool fails health check within `SWITCH_TIMEOUT_MS` (default 10000).
 
+The switch endpoint has a read-only companion so a client can render the current state without mutating it:
+
+- **Request:** `GET /branches/current` — no body, no side effects, no cooldown.
+- **Response (200):** `{"active": "slow" | "fast"}` — read straight off `BranchSwitcher.active`, the same value a successful switch returns.
+- **Response (503):** the switcher was never wired onto `app.state` (fails closed, never a 500).
+
 ## Implementation sketch
 
 1. Acquire `app.state.switch_lock` (an `asyncio.Lock`) to serialize concurrent switch attempts.
@@ -44,6 +50,10 @@ The endpoint never touches the Neon API directly. The URL for each branch is wir
 3. Concurrent switches (two requests in flight) serialize via the lock; the second one sees the first's result and returns 409.
 4. The response body includes an ISO8601 `switched_at` and a positive integer `latency_ms`.
 5. The buffer on `app.state.slowquery_buffer` is cleared after a successful switch.
+20. `GET /branches/current` returns 200 `{"active": "slow"}` on a fresh app (the `.branch_state` default).
+21. `GET /branches/current` reflects a completed switch: after `POST /branches/switch {"target": "fast"}` it returns `{"active": "fast"}`.
+22. `GET /branches/current` is read-only — it is not throttled by the mutation cooldown and does not require the admin token, so a dashboard can poll it.
+23. `GET /branches/current` returns 503 (not 500) when the switcher was never wired onto `app.state`.
 
 **Success (integration — two Testcontainers Postgres instances acting as the two branches):**
 6. Start app pointed at `slow`; the demo endpoints return rows from the slow container. `POST /branches/switch {"target": "fast"}` → subsequent demo endpoints return rows from the fast container.
@@ -67,7 +77,7 @@ The endpoint never touches the Neon API directly. The URL for each branch is wir
 
 ## Acceptance
 
-- [ ] `src/slowquery_demo/api/routers/branches.py` holds the route.
+- [ ] `src/slowquery_demo/api/routers/branches.py` holds both routes (`POST /branches/switch`, `GET /branches/current`).
 - [ ] `src/slowquery_demo/services/branch_switcher.py` holds the engine swap logic (pure async, no HTTP concepts).
 - [ ] `src/slowquery_demo/schemas/branches.py` holds the `SwitchBranchRequest` and `SwitchBranchResponse` Pydantic models.
 - [ ] `src/slowquery_demo/core/branch_state.py` handles `.branch_state` persistence.

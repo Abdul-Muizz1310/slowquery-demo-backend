@@ -31,6 +31,12 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --frozen --all-extras
       - run: uv run pytest -m "not slow and not integration"
+      # Per-module coverage floors. pyproject's --cov-fail-under is a single
+      # global gate, so one well-covered module can mask a hollow one; these
+      # read the .coverage file the run above wrote. Floors and rationale live
+      # in the Makefile's `floors` target.
+      - name: Per-module coverage floors
+        run: make floors
 
   build:
     needs: test
@@ -39,4 +45,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t ${{ github.repository }}:${{ github.sha }} .
 
-  # NOTE: no deploy job — the Render service auto-deploys main on push.
+  # NOTE: no deploy job — the Render service auto-deploys main on push. This job
+  # verifies the deploy that push triggered actually came up. It is inert unless
+  # the SMOKE_BASE_URL repository variable is set: scripts/smoke_health.py prints
+  # "skipping" and exits 0 without making a single HTTP request (spec 12
+  # invariant 1), so a fork PR or a suspended service can never fail CI.
+  smoke:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv sync --frozen --all-extras
+      - name: Post-deploy /health smoke (skipped when SMOKE_BASE_URL is unset)
+        env:
+          SMOKE_BASE_URL: ${{ vars.SMOKE_BASE_URL }}
+        run: uv run python -m scripts.smoke_health

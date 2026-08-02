@@ -1,4 +1,4 @@
-"""Request + response schemas for ``POST /branches/switch``."""
+"""Request + response schemas for the ``/branches`` routes."""
 
 from __future__ import annotations
 
@@ -30,3 +30,14 @@ class SwitchBranchResponse(BaseModel):
     active: BranchName
     switched_at: datetime
     latency_ms: int
+
+
+class CurrentBranchResponse(BaseModel):
+    """Server response body for ``GET /branches/current``.
+
+    Deliberately just the active branch: the endpoint is the read-only
+    companion to the switch, so it exposes exactly the state the switch
+    mutates and nothing that would need a second source of truth.
+    """
+
+    active: BranchName

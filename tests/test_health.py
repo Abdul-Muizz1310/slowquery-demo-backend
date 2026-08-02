@@ -1,49 +1,28 @@
-"""Smoke tests for the platform endpoints: /health, /metrics, /version."""
+"""Platform-endpoint tests: ``/health``, ``/metrics``, ``/version``.
+
+Every test here builds its app with ``create_app()`` *inside* the test, so the
+autouse ``_isolated_runtime`` fixture (``tests/conftest.py``) has already moved
+``cwd`` to a tmp dir and ``Settings`` reads no values from the developer's
+gitignored repo-root ``.env``. Importing the module-level ``slowquery_demo.main.app``
+singleton would evaluate ``create_app()`` at import time and defeat that, which
+also made the readiness assertion environment-dependent — the old
+``assert body["db"] in {"ok", "down"}`` covered the only two values
+``core/platform.py`` can emit and therefore could not fail either way.
+
+Readiness is instead pinned deterministically from both sides with stand-in
+engines: a probe that resolves ⇒ 200 / ``db: "ok"``, a probe that raises ⇒
+503 / ``db: "down"``.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from slowquery_demo.main import app
-
-client = TestClient(app)
-
-
-def test_health_ok() -> None:
-    resp = client.get("/health")
-    # The unit-lane app has a real engine pointed at a dummy localhost URL, so
-    # the readiness probe resolves to "down" without a live Postgres. Either
-    # outcome is valid here; the contract is that the field is present and the
-    # status code agrees with it.
-    body = resp.json()
-    assert body["service"] == "slowquery_demo"
-    assert body["db"] in {"ok", "down"}
-    assert "commit_sha" in body
-    if body["db"] == "ok":
-        assert resp.status_code == 200
-        assert body["status"] == "ok"
-    else:
-        assert resp.status_code == 503
-        assert body["status"] == "degraded"
-
-
-def test_metrics_returns_200() -> None:
-    resp = client.get("/metrics")
-    assert resp.status_code == 200
-    # Prometheus exposition format is text/plain with the openmetrics-ish body.
-    assert "text/plain" in resp.headers["content-type"]
-
-
-def test_version_returns_service_and_commit() -> None:
-    resp = client.get("/version")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["service"] == "slowquery_demo"
-    assert "version" in body
-    assert "commit_sha" in body
 
 
 class _FakeConn:
@@ -76,39 +55,68 @@ class _RaisingEngine:
         return _cm()
 
 
-def test_health_db_ok_when_probe_succeeds() -> None:
-    """When the engine probe succeeds, /health reports db=ok with a 200."""
-    probe_app = app
-    original = probe_app.state.engine
-    probe_app.state.engine = _OkEngine()
-    try:
-        with TestClient(probe_app) as probe_client:
-            resp = probe_client.get("/health")
-    finally:
-        probe_app.state.engine = original
+def _app_with_engine(engine: object) -> FastAPI:
+    """A freshly-built app whose readiness probe outcome is pinned."""
+    from slowquery_demo.main import create_app
+
+    app = create_app()
+    app.state.engine = engine
+    return app
+
+
+@pytest.fixture
+def healthy_client() -> Iterator[TestClient]:
+    with TestClient(_app_with_engine(_OkEngine())) as client:
+        yield client
+
+
+def test_health_reports_db_ok_when_probe_succeeds(healthy_client: TestClient) -> None:
+    """A resolving ``SELECT 1`` means 200 + ``db: "ok"`` + full service identity."""
+    resp = healthy_client.get("/health")
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["db"] == "ok"
     assert body["status"] == "ok"
+    assert body["db"] == "ok"
+    assert body["service"] == "slowquery_demo"
+    assert body["version"]
+    assert "commit_sha" in body
+
+
+def test_health_reports_db_down_when_probe_raises() -> None:
+    """An unreachable engine means 503 + ``db: "down"`` — never a 200 with a lie."""
+    with TestClient(_app_with_engine(_RaisingEngine())) as client:
+        resp = client.get("/health")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["db"] == "down"
     assert body["service"] == "slowquery_demo"
     assert "commit_sha" in body
 
 
-def test_health_db_down_when_probe_raises() -> None:
-    """When the engine probe raises, /health reports db=down with a 503."""
-    probe_app = app
-    original = probe_app.state.engine
-    probe_app.state.engine = _RaisingEngine()
-    try:
-        with TestClient(probe_app) as probe_client:
-            resp = probe_client.get("/health")
-    finally:
-        probe_app.state.engine = original
+def test_health_reports_db_down_when_no_engine_is_wired() -> None:
+    """Negative space: a half-built app fails closed rather than 200-ing blind."""
+    app = _app_with_engine(None)
+    with TestClient(app) as client:
+        resp = client.get("/health")
 
     assert resp.status_code == 503
+    assert resp.json()["db"] == "down"
+
+
+def test_metrics_returns_200(healthy_client: TestClient) -> None:
+    resp = healthy_client.get("/metrics")
+    assert resp.status_code == 200
+    # Prometheus exposition format is text/plain with the openmetrics-ish body.
+    assert "text/plain" in resp.headers["content-type"]
+
+
+def test_version_returns_service_and_commit(healthy_client: TestClient) -> None:
+    resp = healthy_client.get("/version")
+    assert resp.status_code == 200
     body = resp.json()
-    assert body["db"] == "down"
-    assert body["status"] == "degraded"
     assert body["service"] == "slowquery_demo"
+    assert body["version"]
     assert "commit_sha" in body

@@ -9,28 +9,55 @@
 ![fastapi](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![sqlalchemy](https://img.shields.io/badge/SQLAlchemy-2.0%20async-d71f00?style=flat-square)
 ![neon](https://img.shields.io/badge/Neon-Postgres-00e599?style=flat-square&logo=postgresql&logoColor=white)
-![tests](https://img.shields.io/badge/tests-231%20(182u%20+%2049i)-6e9f18?style=flat-square)
+![tests](https://img.shields.io/badge/tests-271%20(221u%20+%2049i%20+%201slow)-6e9f18?style=flat-square)
 ![mypy](https://img.shields.io/badge/mypy-strict-blue?style=flat-square)
 [![ci](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
 
 ---
 
-```console
-$ curl https://slowquery-demo-backend.onrender.com/_slowquery/queries | jq '.[:2]'
-[
-  {"fingerprint":"c168fc78","calls":6,"p95_ms":2041,
-   "sql":"SELECT … FROM orders ORDER BY created_at DESC LIMIT $1",
-   "suggestions":["CREATE INDEX ix_orders_created_at ON orders(created_at)"]},
-  {"fingerprint":"a3e9b11d","calls":4,"p95_ms":1847,
-   "sql":"SELECT … FROM orders WHERE user_id = $1",
-   "suggestions":["CREATE INDEX ix_orders_user_id ON orders(user_id)"]}
-]
+One captured fingerprint from the live service — verbatim, `suggestions` trimmed to its first entry. It is a snapshot taken 2026-08-02; the counters and percentiles move as traffic flows, so re-running the command will not reproduce these exact numbers.
 
-$ python -m scripts.traffic_generator --burst 60
-fingerprints=7  samples=22  plans=7  suggestions=5
-top: c168fc78  calls=6  p95=2041ms  rule=sort_without_index
+```console
+$ curl -s https://slowquery-demo-backend.onrender.com/_slowquery/queries \
+    | jq 'map(select(.suggestions | length > 0)) | .[0] | .suggestions |= .[:1]'
+{
+  "id": "7f9c44d378fe11e2",
+  "fingerprint": "select orders.id, orders.user_id, orders.status, orders.total_cents, orders.created_at from orders where orders.user_id = cast(? as uuid) order by orders.created_at desc, orders.id desc limit cast(? as int)",
+  "first_seen": "2026-04-11T20:18:10.850418Z",
+  "last_seen": "2026-08-02T01:57:01.532134Z",
+  "call_count": 211,
+  "total_ms": 34301,
+  "p50_ms": 8.57240660116076,
+  "p95_ms": 10.6789851561189,
+  "p99_ms": 20.7338997162878,
+  "max_ms": 110.0723072886467,
+  "suggestions": [
+    {
+      "id": 2,
+      "fingerprint_id": "7f9c44d378fe11e2",
+      "kind": "index",
+      "source": "rules",
+      "rule": null,
+      "sql": "CREATE INDEX IF NOT EXISTS ix_orders_created_at ON orders(created_at);",
+      "rationale": "Sort node on ORDER BY created_at with significant cost; an index ending with created_at would let the planner skip the sort step.",
+      "applied_at": null
+    }
+  ]
+}
 ```
+
+`fingerprint` is the canonical SQL; `id` is the 16-char hash. The full DTO is [`schemas/slowquery.py`](src/slowquery_demo/schemas/slowquery.py) — there is no `calls` or `sql` field on a fingerprint, and `rule` is `null` today (the rule name is not recovered from the rationale; use `source`).
+
+Drive traffic into it:
+
+```console
+$ uv run python -m scripts.traffic_generator \
+    --host https://slowquery-demo-backend.onrender.com --duration 60 --users 3 --json
+{"total": 36, "failures": 0, "p95_ms": 14062.000000005355, "exit_code": 0}
+```
+
+Those are real numbers from a real 60-second run against the live URL on 2026-08-02; `p95_ms` is wall-clock from a laptop over the Render → Neon round-trip, and the process exits non-zero if p95 crosses 30 s or the failure rate crosses 20 % (that tripwire is the point — see [DEMO.md](docs/DEMO.md)).
 
 ---
 
@@ -51,11 +78,12 @@ The demo's punchline: switch from the `slowquery` branch (no indexes, seq scans)
 - 🔍 slowquery-detective middleware installed with 4 compatibility shims
 - 📊 Dashboard API at `/_slowquery/*` — fingerprints, samples, plans, suggestions
 - 📡 SSE stream for live p95 updates to the frontend
-- 🔀 Branch switch endpoint — swap slow ↔ fast in one POST
+- 🔀 Branch switch endpoint — swap slow ↔ fast in one POST, plus a read-only `/branches/current`
+- 🙈 Self-instrumentation filter — the pipeline never fingerprints its own bookkeeping reads or `/health`
 - 🚦 Traffic generator script for burst testing
-- 🧪 182 unit + 49 integration tests (Testcontainers), 85% unit-lane line coverage
+- 🧪 221 unit + 49 integration tests (Testcontainers), 87% unit-lane line coverage
 - 🛡️ Pydantic v2 schemas, `Literal` types, frozen DTOs
-- 🚀 Render free tier with auto-deploy via CI webhook
+- 🚀 Render free tier — Render's GitHub integration auto-deploys `main` on push (no CI deploy hook)
 
 ---
 
@@ -119,7 +147,7 @@ src/slowquery_demo/
 │       ├── orders.py              # /orders (fires sort_without_index rule)
 │       ├── order_items.py         # /order_items
 │       ├── dashboard.py           # /_slowquery/* (queries, detail, force-explain, SSE)
-│       └── branches.py            # /branches/switch
+│       └── branches.py            # /branches/switch, /branches/current
 ├── services/
 │   ├── user_service.py            # user query logic
 │   ├── product_service.py         # product query logic
@@ -134,6 +162,7 @@ src/slowquery_demo/
 │   ├── order_item_repository.py
 │   └── slowquery_repository.py    # fingerprints, samples, plans, suggestions
 ├── models/                        # SQLAlchemy 2.0 async models
+│   ├── base.py                    # DeclarativeBase
 │   ├── user.py · product.py · order.py · order_item.py
 │   └── slowquery_store.py         # 4 bookkeeping tables
 ├── schemas/                       # Pydantic v2 DTOs (frozen, Literal-typed)
@@ -142,13 +171,15 @@ src/slowquery_demo/
     ├── config.py                  # pydantic-settings from .env
     ├── database.py                # async engine + sessionmaker (pool_pre_ping, recycle)
     ├── db_config.py               # asyncpg URL normalisation
+    ├── branch_state.py            # .branch_state load/save (survives restarts)
     ├── access.py                  # mutation cooldown + admin-token gates
     ├── platform.py                # CORS, /health, /version, /metrics, / → /docs
     ├── platform_token.py          # X-Platform-Token (async key fetch + claims)
     ├── errors.py                  # typed DomainError → HTTP mapping
-    └── observability.py           # 4 library shims + drainer task
+    └── observability.py           # 4 library shims + ignore list + drainer task
 
 alembic/versions/0001_initial.py   # full 8-table schema (commerce + bookkeeping)
+scripts/                           # seed_slow · seed_fast · traffic_generator · smoke_health
 ```
 
 ---
@@ -168,6 +199,7 @@ alembic/versions/0001_initial.py   # full 8-table schema (commerce + bookkeeping
 | `POST` | `/_slowquery/queries/{id}/force-explain` | 🔒 Re-analyze (gated: requires `DEMO_MUTATION_TOKEN` even in demo mode) |
 | `GET` | `/_slowquery/api/stream` | 📡 SSE — live p95 updates per fingerprint |
 | `POST` | `/branches/switch` | Switch between `slow` and `fast` Neon branch (per-client cooldown) |
+| `GET` | `/branches/current` | Active branch — read-only, ungated, pollable |
 | `GET` | `/docs` | OpenAPI UI (`/` redirects here) |
 
 > 🔒 The two state-mutating endpoints (`force-explain`, `branches/switch`) are hardened for the public URL: a per-client cooldown (`DEMO_MUTATION_COOLDOWN_S`) throttles both even under `DEMO_MODE`, and the destructive `force-explain` fails closed unless `DEMO_MUTATION_TOKEN` is set. See [DEVIATIONS](docs/DEVIATIONS.md).
@@ -183,10 +215,10 @@ alembic/versions/0001_initial.py   # full 8-table schema (commerce + bookkeeping
 | **Middleware** | [`slowquery-detective`](https://pypi.org/project/slowquery-detective/) v0.1.0 (with 4 in-repo compatibility shims) |
 | **Database** | Neon serverless Postgres, two branches (`slowquery` / `slowquery-fast`) |
 | **Migrations** | Alembic async env, one migration (`0001_initial.py`) — full 8-table schema |
-| **Tests** | pytest + pytest-asyncio, 182 unit + 49 integration (Testcontainers), 85% unit-lane coverage |
+| **Tests** | pytest + pytest-asyncio, 221 unit + 49 integration (Testcontainers), 87% unit-lane coverage |
 | **Lint / Types** | ruff + mypy `--strict` on `src/` |
-| **Hosting** | Render Free tier, auto-deploy via deploy-hook webhook from CI |
-| **CI** | GitHub Actions: lint → test → build → deploy |
+| **Hosting** | Render Free tier — Render's own GitHub integration deploys `main` on push |
+| **CI** | GitHub Actions: lint → test (+ per-module coverage floors) → build → smoke (post-deploy `/health`, skipped unless `SMOKE_BASE_URL` is set) |
 
 ---
 
@@ -216,9 +248,14 @@ uv run uvicorn slowquery_demo.main:app --reload
 ### 🚦 Traffic generator
 
 ```bash
-uv run python -m scripts.traffic_generator --burst 60
-# 60-second burst → populates fingerprints, samples, plans, suggestions
+# Against the local server started above (the default --host):
+uv run python -m scripts.traffic_generator --duration 60 --users 3 --json
+# {"total": 36, "failures": 0, "p95_ms": 14062.000000005355, "exit_code": 0}
+#   ^ shape of the output; the numbers above are from a real run against the
+#     live Render URL, so a local run against a fast Postgres will differ.
 ```
+
+Flags: `--host` (default `http://localhost:8000`), `--duration` (seconds, default 60), `--users` (default 20, sets the inter-request pacing), `--json` (print the summary line). The run populates fingerprints, samples, plans and suggestions, and exits non-zero if p95 > 30 000 ms or the failure rate > 20 % so a broken demo shows up as a red cron run on Render.
 
 ---
 
@@ -232,12 +269,12 @@ uv run pytest --cov=src/slowquery_demo --cov-report=term-missing
 
 | Metric | Value |
 |---|---|
-| **Unit tests** | 168 (unit lane, `-m "not slow and not integration"`) |
-| **Integration tests** | 51 (Testcontainers) |
-| **Line coverage** | **85%** (unit lane, `--cov-fail-under=80`) |
-| **Methodology** | Red-first spec-TDD. Every spec in `docs/specs/` (`00`–`11`) enumerates its test cases before code ships. |
+| **Unit tests** | 221 (unit lane, `-m "not slow and not integration"`) |
+| **Integration tests** | 49 (Testcontainers) |
+| **Line coverage** | **87%** (unit lane, `--cov-fail-under=80`) |
+| **Methodology** | Red-first spec-TDD. Specs `00`–`10` and `12` in `docs/specs/` enumerate their test cases before the code ships. **Spec `11` (mutation gating) is the one exception**: the code landed first in response to an audit and the spec was reconstructed from it afterwards — [it says so at the top](docs/specs/11-mutation-gating.md). |
 
-> **Honesty note:** every test now lives in a numbered `test_NN_*.py` file, each case carrying the `docs/specs/` case it verifies. The earlier standalone `*_coverage.py` files — an after-the-fact, line-targeting coverage pass that asserted mock-call counts and reached into private attributes — have been removed. The two largest (`test_full_coverage.py` + `test_final_coverage.py`, ~1.7k lines) and the six smaller ones (`{dashboard,pagination,repositories,router,services,store_writer}_coverage.py`, ~0.7k lines) were deleted; their behaviourally meaningful cases (typed-error wrapping in the store, `clamp_limit`/cursor round-trips, the fingerprint-id validator, repository/service DTO mapping) were folded into the matching numbered spec files, and the pure line-padding cases were dropped. The suite is now spec-first end to end.
+> **Honesty note:** every test now lives in a numbered `test_NN_*.py` file, each case carrying the `docs/specs/` case it verifies. Assertions are on behaviour, not on source text — the three surviving file-content greps are the documented [no-index guards](docs/ARCHITECTURE.md), and the traffic generator's endpoint-scope tests (one of which was satisfied by a dead constant planted in the script) now drive its real request loop under `respx`. The earlier standalone `*_coverage.py` files — an after-the-fact, line-targeting coverage pass that asserted mock-call counts and reached into private attributes — have been removed. The two largest (`test_full_coverage.py` + `test_final_coverage.py`, ~1.7k lines) and the six smaller ones (`{dashboard,pagination,repositories,router,services,store_writer}_coverage.py`, ~0.7k lines) were deleted; their behaviourally meaningful cases (typed-error wrapping in the store, `clamp_limit`/cursor round-trips, the fingerprint-id validator, repository/service DTO mapping) were folded into the matching numbered spec files, and the pure line-padding cases were dropped. The suite is now spec-first end to end.
 
 ---
 
@@ -256,12 +293,12 @@ uv run pytest --cov=src/slowquery_demo --cov-report=term-missing
 
 ## 🚀 Deploy
 
-Render free tier via [`render.yaml`](render.yaml). CI fires a deploy-hook webhook on green builds.
+Render free tier via [`render.yaml`](render.yaml). Render's GitHub integration watches `main`, so **pushing is the deploy** — CI does not fire a deploy hook and there is no `RENDER_DEPLOY_HOOK` secret ([DEVIATIONS §11](docs/DEVIATIONS.md)).
 
 1. Render dashboard → **New → Blueprint** → connect this repo
-2. Fill env vars in service settings
-3. Copy the Deploy Hook URL → `gh secret set RENDER_DEPLOY_HOOK --body '<url>'`
-4. Push to `main` → CI lint/test/build → CI fires hook → Render rebuilds
+2. Fill env vars in service settings (`DATABASE_URL`, `DATABASE_URL_FAST`, `SLOWQUERY_STORE_URL`; optionally `DEMO_MUTATION_TOKEN` to enable `force-explain`)
+3. Push to `main` → Render rebuilds; CI runs lint → test → build in parallel
+4. *Optional:* set a `SMOKE_BASE_URL` repository variable to the service URL and CI's `smoke` job will poll the deployed `/health` after the build. Leave it unset and the job skips (spec 12) — nothing to break.
 
 ---
 

@@ -1,7 +1,7 @@
 [project]
 name = "slowquery_demo"
 version = "0.1.0"
-description = "Live demo backend for slowquery-detective (1M-row Neon dataset, slow/fast branch switching)"
+description = "Live demo backend for slowquery-detective (seeded Neon dataset, slow/fast branch switching)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -66,7 +66,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=src --cov-report=term-missing --cov-fail-under=80"
+# --cov-branch: a global line-coverage gate hides untaken branches, which is
+# exactly where the negative-space guards live. Per-module floors are enforced
+# separately (`make floors` / the `test` job in .github/workflows/ci.yml) because
+# coverage.py's --fail-under is global only.
+addopts = "--cov=src --cov-branch --cov-report=term-missing --cov-fail-under=80"
 markers = [
     "slow: slow end-to-end tests (CI-only, opt-in)",
     "integration: requires Testcontainers / real Postgres",

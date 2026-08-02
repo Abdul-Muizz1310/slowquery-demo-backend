@@ -55,5 +55,5 @@ These match the Zod schemas pinned in `slowquery-dashboard-frontend/src/lib/api/
 - [ ] `repositories/slowquery_repository.py` exists with `list_fingerprints`, `get_fingerprint_detail` functions
 - [ ] `schemas/slowquery.py` exports the five response DTOs
 - [ ] `api/routers/dashboard.py` is expanded to two endpoints reading the real tables
-- [ ] 12 unit tests in `tests/unit/test_08_dashboard_read_api.py`
+- [ ] 11 unit tests in `tests/unit/test_08_dashboard_read_api.py`
 - [ ] Lint + mypy + tests green

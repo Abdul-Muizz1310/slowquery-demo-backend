@@ -22,5 +22,5 @@ Wire the `engine_builder` callable into `BranchSwitcher` so `POST /branches/swit
 ## Acceptance criteria
 - [ ] `services/branch_switcher.py` accepts and calls `engine_builder`
 - [ ] `main.py` passes the engine_builder closure
-- [ ] 5 unit tests in `tests/unit/test_10_engine_rebuild.py`
+- [ ] 8 unit tests in `tests/unit/test_10_engine_rebuild.py`
 - [ ] Lint + mypy + tests green

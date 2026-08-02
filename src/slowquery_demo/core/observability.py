@@ -62,11 +62,12 @@ import contextlib
 import json
 import logging
 import random
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import slowquery_detective.hooks as _sqd_hooks
 import slowquery_detective.middleware as _sqd_middleware
@@ -132,6 +133,61 @@ _CONTEXT_START_ATTR = "_slowquery_demo_start"
 _BridgeItem = tuple[str, str, str, tuple[Any, ...], float]
 
 
+# --- Self-instrumentation ignore list (spec 05 invariants 5-6) -----------
+#
+# The dashboard read API (``api/routers/dashboard.py`` →
+# ``repositories/slowquery_repository.py``) selects from the bookkeeping
+# tables through the *same* instrumented engine that serves the commerce
+# routes, and ``/health`` probes that engine with ``SELECT 1``. Without a
+# filter the pipeline observes itself: every dashboard poll and every
+# readiness probe becomes a permanent ``query_fingerprints`` row, and
+# because ``total_ms`` accumulates on every call the observability
+# system's own bookkeeping reads climb to the top of the demo's headline
+# ``/_slowquery/queries`` list — burying the seeded commerce slow queries
+# the demo exists to show.
+
+# The four bookkeeping tables written by :class:`PostgresStoreWriter`.
+IGNORED_TABLES: Final[frozenset[str]] = frozenset(
+    {"query_fingerprints", "query_samples", "explain_plans", "suggestions"}
+)
+
+# Word-boundary alternation so ``suggestions_count`` / ``archived_suggestions``
+# on a commerce table are still recorded. Sorted for a stable pattern.
+_IGNORED_TABLE_RE: Final = re.compile(
+    r"\b(?:" + "|".join(sorted(IGNORED_TABLES)) + r")\b", re.IGNORECASE
+)
+
+# The readiness probe ``platform._health`` (and ``main._make_engine_builder``'s
+# post-rebuild health check) issue verbatim. Anchored so ``SELECT 100`` and
+# ``SELECT 1, orders.id ...`` are not swallowed.
+_HEALTH_PROBE_RE: Final = re.compile(r"^select\s+1\s*;?$", re.IGNORECASE)
+
+
+def should_ignore_statement(statement: str) -> bool:
+    """True when ``statement`` is the observability system's own traffic.
+
+    Applied in the ``after_cursor_execute`` hook *before* the rolling
+    buffer and the bridge queue, so an ignored statement produces neither
+    a percentile sample nor a persisted fingerprint.
+
+    Ignored:
+
+    - any statement referencing one of :data:`IGNORED_TABLES` (the
+      dashboard read API's own bookkeeping selects),
+    - the ``SELECT 1`` readiness probe behind ``/health``,
+    - a blank statement (nothing meaningful to fingerprint).
+
+    Everything else — the seeded commerce queries the demo exists to
+    surface — is recorded.
+    """
+    collapsed = " ".join(statement.split())
+    if not collapsed:
+        return True
+    if _HEALTH_PROBE_RE.match(collapsed):
+        return True
+    return _IGNORED_TABLE_RE.search(collapsed) is not None
+
+
 def _make_patched_attach(
     bridge_queue: asyncio.Queue[_BridgeItem],
     loop_ref: list[asyncio.AbstractEventLoop | None],
@@ -183,6 +239,11 @@ def _make_patched_attach(
             _ = (conn, cursor, executemany)
             start = getattr(context, _CONTEXT_START_ATTR, None)
             if start is None:
+                return
+            # Spec 05 invariants 5-6: never observe our own bookkeeping
+            # reads or the readiness probe. Checked before both recording
+            # sinks so an ignored statement leaves no trace at all.
+            if should_ignore_statement(statement):
                 return
             duration_ms = (time.perf_counter() - start) * 1000.0
             try:

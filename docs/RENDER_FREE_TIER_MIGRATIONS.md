@@ -137,8 +137,12 @@ Move to B1 the first time any of these is true:
 - A second person deploys this repo.
 - A migration ships in a normal merge commit rather than a dedicated
   release session (i.e. no human runs alembic by hand at merge time).
-- The CI `deploy` job starts firing the Render hook automatically on
-  every push to main (see `RENDER_DEPLOY_HOOK` / `ci.yml`).
+- Deploys stop being human-initiated. This is **already true**: Render's own
+  auto-deploy-on-push is what ships `main` today. There is no CI `deploy` job
+  and no `RENDER_DEPLOY_HOOK` secret — that job was removed (see
+  [DEVIATIONS §11](DEVIATIONS.md)); `ci.yml` runs lint → test → build and then a
+  post-deploy `/health` smoke check that is skipped unless `SMOKE_BASE_URL` is
+  set (spec 12).
 
 Until then, the manual step is the least-moving-parts option.
 

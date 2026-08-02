@@ -187,6 +187,132 @@ async def test_on_branch_switch_reattaches_hooks_to_new_engine() -> None:
     assert called_engine is new_engine
 
 
+# --- Self-instrumentation ignore list (spec 05 invariants 5-6) ----------
+#
+# The dashboard read API selects from the bookkeeping tables through the
+# *instrumented* engine and ``/health`` probes it with ``SELECT 1``. Without
+# a statement-level ignore list the pipeline fingerprints its own bookkeeping
+# reads and the headline ``/_slowquery/queries`` list is dominated by the
+# observability system instead of the seeded commerce slow queries.
+
+# The literal statements SQLAlchemy emits for the dashboard read API — copied
+# from the shapes ``repositories/slowquery_repository.py`` compiles.
+_BOOKKEEPING_STATEMENTS = (
+    "SELECT query_fingerprints.id, query_fingerprints.total_ms \n"
+    "FROM query_fingerprints ORDER BY query_fingerprints.total_ms DESC",
+    "SELECT query_samples.id, query_samples.duration_ms \n"
+    "FROM query_samples \nWHERE query_samples.fingerprint_id = $1::VARCHAR",
+    "SELECT explain_plans.plan_json \nFROM explain_plans "
+    "\nWHERE explain_plans.fingerprint_id = $1::VARCHAR",
+    "SELECT suggestions.id, suggestions.kind \nFROM suggestions ORDER BY suggestions.id",
+)
+
+_COMMERCE_STATEMENTS = (
+    "SELECT orders.id, orders.created_at \nFROM orders "
+    "ORDER BY orders.created_at DESC \n LIMIT $1::INTEGER",
+    "SELECT orders.id \nFROM orders \nWHERE orders.user_id = $1::UUID",
+    "SELECT order_items.id \nFROM order_items \nWHERE order_items.product_id = $1::UUID",
+    "SELECT users.id, users.email \nFROM users \n LIMIT $1::INTEGER",
+)
+
+
+@pytest.mark.parametrize("statement", _BOOKKEEPING_STATEMENTS)
+def test_bookkeeping_reads_are_ignored(statement: str) -> None:
+    """Spec 05 test 18: every bookkeeping-table read is filtered out."""
+    from slowquery_demo.core.observability import should_ignore_statement
+
+    assert should_ignore_statement(statement) is True
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["SELECT 1", "select 1", "  SELECT   1  ", "SELECT 1;", "", "   "],
+)
+def test_health_probe_and_blank_statements_are_ignored(statement: str) -> None:
+    """Spec 05 test 19: the ``/health`` readiness probe never becomes a fingerprint."""
+    from slowquery_demo.core.observability import should_ignore_statement
+
+    assert should_ignore_statement(statement) is True
+
+
+@pytest.mark.parametrize("statement", _COMMERCE_STATEMENTS)
+def test_commerce_reads_are_recorded(statement: str) -> None:
+    """Spec 05 test 20: the queries the demo exists to surface are NOT filtered."""
+    from slowquery_demo.core.observability import should_ignore_statement
+
+    assert should_ignore_statement(statement) is False
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # ``suggestions_count`` merely *contains* a bookkeeping table name.
+        "SELECT products.suggestions_count \nFROM products \n LIMIT $1::INTEGER",
+        # ``SELECT 100`` is not the ``SELECT 1`` readiness probe.
+        "SELECT 100",
+        # A commerce table whose name embeds a bookkeeping name as a prefix.
+        "SELECT archived_suggestions.id \nFROM archived_suggestions",
+    ],
+)
+def test_ignore_list_does_not_over_match(statement: str) -> None:
+    """Spec 05 test 21: the filter is word-boundary exact, not a substring sweep."""
+    from slowquery_demo.core.observability import should_ignore_statement
+
+    assert should_ignore_statement(statement) is False
+
+
+class _FakeExecutionContext:
+    """Stand-in for SQLAlchemy's ``ExecutionContext`` (attribute-settable)."""
+
+
+async def _fire_hook(statement: str) -> tuple[frozenset[str], int]:
+    """Drive one before/after hook pair and report what got recorded.
+
+    Returns ``(buffer keys, bridge-queue depth)`` so a test can assert on
+    both recording sinks the ``_after`` listener writes to.
+    """
+    import asyncio
+
+    from slowquery_detective.buffer import RingBuffer
+    from sqlalchemy import create_engine
+
+    from slowquery_demo.core.observability import _make_patched_attach
+
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=16)
+    attach = _make_patched_attach(queue, [asyncio.get_running_loop()])  # type: ignore[arg-type]
+    buffer = RingBuffer()
+    # A real (never-connected) sync Engine so ``event.listen`` has a valid target.
+    engine = create_engine("sqlite://")
+    attach(engine, buffer)
+    before, after = engine._slowquery_listeners  # type: ignore[attr-defined]
+
+    context = _FakeExecutionContext()
+    before(None, None, statement, (), context, False)
+    after(None, None, statement, (), context, False)
+    # ``_after`` dispatches to the queue via ``loop.call_soon_threadsafe``.
+    await asyncio.sleep(0)
+    return buffer.keys(), queue.qsize()
+
+
+async def test_hook_records_nothing_for_ignored_statement() -> None:
+    """Spec 05 test 22 (negative half): an ignored statement reaches neither sink."""
+    keys, depth = await _fire_hook(_BOOKKEEPING_STATEMENTS[0])
+
+    assert keys == frozenset()
+    assert depth == 0
+
+
+async def test_hook_records_commerce_statement_in_both_sinks() -> None:
+    """Spec 05 test 22 (positive half): a commerce statement still flows through.
+
+    Guards against a filter so broad it silences the pipeline entirely.
+    """
+    keys, depth = await _fire_hook(_COMMERCE_STATEMENTS[0])
+
+    assert len(keys) == 1
+    assert depth == 1
+
+
 def test_reattach_slowquery_noop_when_not_installed() -> None:
     """``reattach_slowquery`` is a safe no-op if the pipeline is absent."""
     from fastapi import FastAPI

@@ -17,5 +17,5 @@ Add `GET /_slowquery/api/stream` that sends Server-Sent Events to the Phase 4c d
 
 ## Acceptance criteria
 - [ ] `api/routers/dashboard.py` adds `GET /api/stream` returning `StreamingResponse`
-- [ ] 5 unit tests in `tests/unit/test_09_sse_stream.py`
+- [ ] 10 unit tests in `tests/unit/test_09_sse_stream.py`
 - [ ] Lint + mypy + tests green

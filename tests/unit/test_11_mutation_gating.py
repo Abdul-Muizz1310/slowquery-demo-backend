@@ -81,6 +81,70 @@ def test_force_explain_passes_gate_with_correct_token(monkeypatch: pytest.Monkey
     assert resp.status_code not in (403, 429)
 
 
+def test_force_explain_writes_plan_and_reports_suggestion_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec 11 test 3 (past the gate): with a token *and* a working store, the
+    handler upserts the fingerprint, writes the synthetic plan, and reports how
+    many suggestions came out.
+
+    ``test_force_explain_passes_gate_with_correct_token`` only asserts the gate
+    did not refuse; the store then fails against the dummy localhost URL, so the
+    handler body itself had no coverage. Substituting the store covers it.
+    """
+    client = _build_client(monkeypatch, DEMO_MUTATION_TOKEN="s3cret")
+    store = AsyncMock()
+    client.app.state.slowquery_store = store  # type: ignore[attr-defined]
+
+    resp = client.post(
+        "/_slowquery/queries/abc123/force-explain",
+        headers={"X-Admin-Token": "s3cret"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    # The synthetic plan is a bare Result node, which no rule matches, and the
+    # unit-lane app has no LLM explainer wired — so zero suggestions.
+    assert body["suggestions_count"] == "0"
+
+    store.upsert_fingerprint.assert_awaited_once()
+    assert store.upsert_fingerprint.await_args.args[0] == "abc123"
+    store.upsert_plan.assert_awaited_once()
+    plan = store.upsert_plan.await_args.kwargs["plan_json"]
+    assert plan["Plan"]["Node Type"] == "Result"
+    store.insert_suggestions.assert_not_awaited()
+
+
+def test_force_explain_without_a_store_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative space: an app whose store was never wired fails closed with 503,
+    not an AttributeError 500."""
+    client = _build_client(monkeypatch, DEMO_MUTATION_TOKEN="s3cret")
+    client.app.state.slowquery_store = None  # type: ignore[attr-defined]
+
+    resp = client.post(
+        "/_slowquery/queries/abc123/force-explain",
+        headers={"X-Admin-Token": "s3cret"},
+    )
+    assert resp.status_code == 503
+
+
+def test_force_explain_rejects_malformed_fingerprint_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The id is validated before any store write, so a path payload can never
+    reach the database layer."""
+    client = _build_client(monkeypatch, DEMO_MUTATION_TOKEN="s3cret")
+    store = AsyncMock()
+    client.app.state.slowquery_store = store  # type: ignore[attr-defined]
+
+    resp = client.post(
+        "/_slowquery/queries/NOT-HEX!/force-explain",
+        headers={"X-Admin-Token": "s3cret"},
+    )
+
+    assert resp.status_code == 404
+    store.upsert_fingerprint.assert_not_awaited()
+
+
 # --- branch switch: cooldown + optional lockdown ----------------------------
 
 
