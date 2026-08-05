@@ -32,7 +32,7 @@ dev = [
     "polyfactory>=2.18",
     "testcontainers[postgres]>=4.8",
     "ruff>=0.8",
-    "mypy>=1.13",
+    "mypy>=2.3.0",
 ]
 
 [build-system]
