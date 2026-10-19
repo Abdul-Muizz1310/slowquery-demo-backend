@@ -14,6 +14,10 @@ floors:
 	uv run coverage report --include="src/slowquery_demo/api/routers/dashboard.py" --fail-under=85
 	uv run coverage report --include="src/slowquery_demo/core/access.py" --fail-under=90
 	uv run coverage report --include="src/slowquery_demo/core/platform.py" --fail-under=90
+	uv run coverage report --include="src/slowquery_demo/core/platform_auth.py" --fail-under=95
+	uv run coverage report --include="src/slowquery_demo/core/platform_token.py" --fail-under=90
+	uv run coverage report --include="src/slowquery_demo/core/platform_keys.py" --fail-under=90
+	uv run coverage report --include="src/slowquery_demo/core/public_routes.py" --fail-under=95
 	uv run coverage report --include="src/slowquery_demo/core/observability.py" --fail-under=60
 	uv run coverage report --include="src/slowquery_demo/services/store.py" --fail-under=85
 	uv run coverage report --include="src/slowquery_demo/services/branch_switcher.py" --fail-under=95

@@ -21,8 +21,17 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "info"
     port: int = 8000
-    demo_mode: bool = True
+    # Contract v2 (spec 14): DEMO_MODE only lets a request *without* a token
+    # through anonymous; an invalid token is still 401. Off unless set.
+    demo_mode: bool = False
     cors_origins: str = ""
+
+    # --- platform token keys (spec 14) ---
+    # bastion's Ed25519 public key (base64 SPKI DER), else fetched from the URL
+    # (JSON field ``publicKey``, cached 1 h); and the dashboard frontend's own.
+    bastion_signing_key_public: str | None = None
+    bastion_public_key_url: str | None = None
+    slowquery_frontend_signing_key_public: str | None = None
 
     # --- mutation gating (public-URL hardening) ---
     # Shared secret required to call the state-mutating endpoints

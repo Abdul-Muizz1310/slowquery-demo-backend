@@ -2,9 +2,9 @@
 
 Two independent, composable gates guard the only endpoints with lasting
 cross-visitor side effects (``POST /branches/switch`` and
-``POST /_slowquery/{id}/force-explain``). They apply *even while
-``DEMO_MODE`` bypasses the platform-token middleware*, closing the two
-HIGH findings from the audit:
+``POST /_slowquery/{id}/force-explain``). They apply on top of the
+platform token (spec 14) and *even while ``DEMO_MODE`` lets anonymous
+requests through*, closing the two HIGH findings from the audit:
 
 * :func:`enforce_cooldown` — a per-client in-process cooldown so a
   visitor cannot spam engine-rebuild churn (branch switch) or repeated
@@ -30,6 +30,8 @@ import time
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
+
+from slowquery_demo.core.platform_token import Principal
 
 if TYPE_CHECKING:
     from slowquery_demo.core.config import Settings
@@ -65,8 +67,19 @@ class CooldownLimiter:
         return True
 
 
-def _client_key(request: Request) -> str:
-    """Stable per-caller key for the cooldown (client IP, else a constant)."""
+def rate_limit_key(request: Request) -> str:
+    """The cooldown bucket (spec 14): ``iss:sub`` when authenticated.
+
+    Otherwise the leftmost ``X-Forwarded-For`` address (the visitor, behind
+    Render's proxy or the dashboard's signed proxy), else the socket peer.
+    """
+    principal: Principal | None = getattr(request.state, "platform_principal", None)
+    if principal is not None:
+        return principal.bucket
+    forwarded = request.headers.get("x-forwarded-for", "")
+    leftmost = forwarded.split(",")[0].strip()
+    if leftmost:
+        return leftmost
     client = request.client
     return client.host if client is not None else "unknown"
 
@@ -85,7 +98,7 @@ async def enforce_cooldown(request: Request) -> None:
     limiter: CooldownLimiter | None = getattr(request.app.state, "mutation_limiter", None)
     if limiter is None:
         return
-    if not limiter.allow(_client_key(request)):
+    if not limiter.allow(rate_limit_key(request)):
         raise HTTPException(
             status_code=429,
             detail="rate limited: this endpoint has a cooldown; retry shortly",

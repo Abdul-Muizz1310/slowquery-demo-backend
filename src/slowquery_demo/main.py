@@ -32,7 +32,7 @@ from slowquery_demo.core.observability import (
     slowquery_lifespan,
 )
 from slowquery_demo.core.platform import install_platform_middleware, resolve_cors_origins
-from slowquery_demo.core.platform_token import install_platform_token
+from slowquery_demo.core.platform_auth import install_platform_auth
 from slowquery_demo.services.branch_switcher import BranchSwitcher
 
 logger = logging.getLogger(__name__)
@@ -108,12 +108,15 @@ def create_app() -> FastAPI:
     engine, session_factory = build_engine(settings.database_url)
 
     app = FastAPI(title="slowquery_demo", version="0.1.0", lifespan=slowquery_lifespan)
+    # Starlette runs the last-added middleware first. The token check goes in
+    # first so CORS and the request id wrap it: a preflight never reaches it,
+    # and a 401 still carries CORS headers and an X-Request-Id.
+    install_platform_auth(app, settings=settings)
     install_platform_middleware(
         app,
         service_name="slowquery_demo",
         cors_origins=resolve_cors_origins(settings.cors_origins, app_env=settings.app_env),
     )
-    install_platform_token(app, demo_mode=settings.demo_mode)
     register_exception_handlers(app)
 
     app.state.settings = settings

@@ -4,7 +4,7 @@ Provides the cross-cutting concerns every backend needs to be discoverable by a
 control plane:
 
 - ``X-Request-Id`` propagation (generated if absent, echoed on response)
-- ``X-Platform-Token`` placeholder (demo mode accepts any token)
+- CORS (outermost, so a 401 from the platform-token check still carries it)
 - ``/health`` — readiness probe (real ``SELECT 1`` against ``app.state.engine``)
 - ``/version`` — build identifier
 - ``/metrics`` — Prometheus exposition (prometheus-fastapi-instrumentator)
@@ -30,6 +30,15 @@ _PROD_ORIGINS = [
 ]
 
 _HEALTH_CHECK_TIMEOUT_S = 5.0
+
+# Contract v2 §2: the request headers a browser or bastion may send.
+CORS_ALLOWED_HEADERS = (
+    "x-platform-token",
+    "x-request-id",
+    "content-type",
+    "authorization",
+    "x-admin-token",
+)
 
 
 def resolve_cors_origins(cors_origins: str, *, app_env: str) -> list[str]:
@@ -103,7 +112,7 @@ def install_platform_middleware(
         allow_origins=cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["*"],
+        allow_headers=list(CORS_ALLOWED_HEADERS),
     )
 
     @app.middleware("http")

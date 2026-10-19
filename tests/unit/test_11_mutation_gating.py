@@ -219,6 +219,7 @@ class _FakeRequest:
             self.app.state.mutation_limiter = limiter
         self.headers = {"x-admin-token": token} if token is not None else {}
         self.client = _FakeClient(host)
+        self.state = _FakeState()  # no platform principal: an anonymous caller
 
 
 class _Settings:

@@ -9,7 +9,7 @@
 ![fastapi](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![sqlalchemy](https://img.shields.io/badge/SQLAlchemy-2.0%20async-d71f00?style=flat-square)
 ![neon](https://img.shields.io/badge/Neon-Postgres-00e599?style=flat-square&logo=postgresql&logoColor=white)
-![tests](https://img.shields.io/badge/tests-308%20(250u%20+%2057i%20+%201slow)-6e9f18?style=flat-square)
+![tests](https://img.shields.io/badge/tests-377%20(319u%20+%2057i%20+%201slow)-6e9f18?style=flat-square)
 ![mypy](https://img.shields.io/badge/mypy-strict-blue?style=flat-square)
 [![ci](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
@@ -47,6 +47,8 @@ $ curl -s https://slowquery-demo-backend.onrender.com/_slowquery/queries \
 }
 ```
 
+`/_slowquery/*` needs a platform token (spec 14); the plain `curl` above answers only while the live service runs with `DEMO_MODE=true`. The dashboard reaches it through its signing proxy, and the commerce routes stay public.
+
 `fingerprint` is the canonical SQL; `id` is the 16-char hash. The full DTO is [`schemas/slowquery.py`](src/slowquery_demo/schemas/slowquery.py) — there is no `calls` or `sql` field on a fingerprint, and `rule` is `null` today (the rule name is not recovered from the rationale; use `source`).
 
 Drive traffic into it:
@@ -81,7 +83,7 @@ The demo's punchline: switch from the `slowquery` branch (no indexes, seq scans)
 - 🔀 Branch switch endpoint — swap slow ↔ fast in one POST, plus a read-only `/branches/current`
 - 🙈 Self-instrumentation filter — the pipeline never fingerprints its own bookkeeping reads or `/health`
 - 🚦 Traffic generator, run against the live URL every 6 h by a GitHub Actions schedule (`.github/workflows/traffic.yml`)
-- 🧪 250 unit + 57 integration tests (Testcontainers, both lanes in CI), 87% unit-lane line coverage
+- 🧪 319 unit + 57 integration tests (Testcontainers, both lanes in CI), 88% unit-lane line coverage
 - 🗃️ Migrations apply themselves: the container migrates the slow branch, the fast branch and the store before it serves
 - 🛡️ Pydantic v2 schemas, `Literal` types, frozen DTOs
 - 🚀 Render free tier — Render's GitHub integration auto-deploys `main` on push (no CI deploy hook)
@@ -175,7 +177,10 @@ src/slowquery_demo/
     ├── branch_state.py            # .branch_state load/save (survives restarts)
     ├── access.py                  # mutation cooldown + admin-token gates
     ├── platform.py                # CORS, /health, /version, /metrics, / → /docs
-    ├── platform_token.py          # X-Platform-Token (async key fetch + claims)
+    ├── platform_auth.py           # contract-v2 middleware (public / 401 / 503 / principal)
+    ├── platform_token.py          # pure token verification (claims, leeway, key decides iss)
+    ├── platform_keys.py           # bastion + dashboard public keys (env, cached URL fetch)
+    ├── public_routes.py           # which method + path need no token
     ├── errors.py                  # typed DomainError → HTTP mapping
     └── observability.py           # 4 library shims + ignore list + drainer task
 
@@ -189,23 +194,26 @@ scripts/                           # seed_slow · seed_fast · traffic_generator
 
 ## 🌐 API surface
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `GET` | `/health` | Liveness + service identity |
-| `GET` | `/version` | Build version |
-| `GET` | `/users?limit=N` | Seeded users (triggers slow query) |
-| `GET` | `/users/{id}/orders` | Seq scan on `orders.user_id` (slow branch) |
-| `GET` | `/orders?limit=N` | `ORDER BY created_at` — fires `sort_without_index` rule |
-| `GET` | `/products?limit=N` | Seeded products |
-| `GET` | `/_slowquery/queries` | Dashboard API — live fingerprint list with suggestions |
-| `GET` | `/_slowquery/queries/{id}` | Full detail for one fingerprint (plan, samples, suggestions) |
-| `POST` | `/_slowquery/queries/{id}/force-explain` | 🔒 Re-analyze (gated: requires `DEMO_MUTATION_TOKEN` even in demo mode) |
-| `GET` | `/_slowquery/api/stream` | 📡 SSE — live p95 updates per fingerprint |
-| `POST` | `/branches/switch` | Switch between `slow` and `fast` Neon branch (per-client cooldown) |
-| `GET` | `/branches/current` | Active branch — read-only, ungated, pollable |
-| `GET` | `/docs` | OpenAPI UI (`/` redirects here) |
+Every route except the public ones needs a platform token (contract v2, [spec 14](docs/specs/14-platform-contract-v2.md)): an Ed25519 JWT in `X-Platform-Token` (or `Authorization: Bearer`) with `aud "slowquery"`, signed by bastion's key (`iss "bastion"`) or the dashboard's own key (`iss "slowquery-frontend"`, `role "frontend"`). Without one a protected route answers `401 missing_platform_token`, unless `DEMO_MODE=true` (default `false`) lets the request through anonymous; an invalid token is always `401 invalid_platform_token`; with no trusted key configured protected routes answer `503 platform_auth_unconfigured`.
 
-> 🔒 The two state-mutating endpoints (`force-explain`, `branches/switch`) are hardened for the public URL: a per-client cooldown (`DEMO_MUTATION_COOLDOWN_S`) throttles both even under `DEMO_MODE`, and the destructive `force-explain` fails closed unless `DEMO_MUTATION_TOKEN` is set. See [DEVIATIONS](docs/DEVIATIONS.md).
+| Method | Endpoint | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/health` | public | Liveness + service identity |
+| `GET` | `/version` | public | Build version |
+| `GET` | `/users?limit=N`, `/users/{id}` | public | Seeded users |
+| `GET` | `/users/{id}/orders` | public | Seq scan on `orders.user_id` (slow branch) |
+| `GET` | `/orders?limit=N`, `/orders/{id}` | public | `ORDER BY created_at` — fires `sort_without_index` rule |
+| `GET` | `/products?limit=N`, `/products/{id}` | public | Seeded products |
+| `GET` | `/order_items?product_id=…` | public | Seq scan on `order_items.product_id` |
+| `GET` | `/_slowquery/queries` | token | Dashboard API — live fingerprint list with suggestions |
+| `GET` | `/_slowquery/queries/{id}` | token | Full detail for one fingerprint (plan, samples, suggestions) |
+| `POST` | `/_slowquery/queries/{id}/force-explain` | token + `X-Admin-Token` | 🔒 Re-analyze (fails closed unless `DEMO_MUTATION_TOKEN` is set) |
+| `GET` | `/_slowquery/api/stream` | token | 📡 SSE — live p95 updates per fingerprint |
+| `POST` | `/branches/switch` | token | Switch between `slow` and `fast` Neon branch (cooldown per `iss:sub`) |
+| `GET` | `/branches/current` | token | Active branch — read-only, not throttled |
+| `GET` | `/docs`, `/redoc`, `/openapi.json`, `/metrics` | public | OpenAPI UI (`/` redirects here), Prometheus |
+
+> 🔒 The two state-mutating endpoints (`force-explain`, `branches/switch`) are hardened for the public URL on top of the token: a cooldown (`DEMO_MUTATION_COOLDOWN_S`) bucketed on the caller's `iss:sub` (or, anonymous, its leftmost `X-Forwarded-For` address), and the destructive `force-explain` fails closed unless `DEMO_MUTATION_TOKEN` is set. See [DEVIATIONS](docs/DEVIATIONS.md).
 
 ---
 
@@ -218,7 +226,7 @@ scripts/                           # seed_slow · seed_fast · traffic_generator
 | **Middleware** | [`slowquery-detective`](https://pypi.org/project/slowquery-detective/) v0.1.0 (with 4 in-repo compatibility shims) |
 | **Database** | Neon serverless Postgres, two branches (`slowquery` / `slowquery-fast`) |
 | **Migrations** | Alembic async env, two revisions (`0001_initial.py` full schema, `0002_dedupe_suggestions.py`), applied to every branch by the container entrypoint at boot ([spec 13](docs/specs/13-migrations-on-deploy.md)) |
-| **Tests** | pytest + pytest-asyncio, 250 unit + 57 integration (Testcontainers), 87% unit-lane coverage |
+| **Tests** | pytest + pytest-asyncio, 319 unit + 57 integration (Testcontainers), 88% unit-lane coverage |
 | **Lint / Types** | ruff + mypy `--strict` on `src/` |
 | **Hosting** | Render Free tier — Render's own GitHub integration deploys `main` on push |
 | **CI** | GitHub Actions: lint → test (+ per-module coverage floors) and integration (Testcontainers) → build (boots the image against two Postgres services and checks both are migrated) → smoke (post-deploy `/health`, skipped unless `SMOKE_BASE_URL` is set); a separate `traffic` workflow drives the live URL every 6 h |
@@ -273,10 +281,10 @@ uv run pytest --cov=src/slowquery_demo --cov-report=term-missing
 
 | Metric | Value |
 |---|---|
-| **Unit tests** | 250 (unit lane, `-m "not slow and not integration"`) |
+| **Unit tests** | 319 (unit lane, `-m "not slow and not integration"`) |
 | **Integration tests** | 57 (Testcontainers; CI `integration` job) |
-| **Line coverage** | **87%** (unit lane, `--cov-fail-under=80`) |
-| **Methodology** | Red-first spec-TDD. Specs `00`–`10`, `12` and `13` in `docs/specs/` enumerate their test cases before the code ships. **Spec `11` (mutation gating) is the one exception**: the code landed first in response to an audit and the spec was reconstructed from it afterwards — [it says so at the top](docs/specs/11-mutation-gating.md). |
+| **Line coverage** | **88%** (unit lane, `--cov-fail-under=80`) |
+| **Methodology** | Red-first spec-TDD. Specs `00`–`10`, `12`, `13` and `14` in `docs/specs/` enumerate their test cases before the code ships. **Spec `11` (mutation gating) is the one exception**: the code landed first in response to an audit and the spec was reconstructed from it afterwards — [it says so at the top](docs/specs/11-mutation-gating.md). |
 
 > **Honesty note:** every test now lives in a numbered `test_NN_*.py` file, each case carrying the `docs/specs/` case it verifies. Assertions are on behaviour, not on source text — the three surviving file-content greps are the documented [no-index guards](docs/ARCHITECTURE.md), and the traffic generator's endpoint-scope tests (one of which was satisfied by a dead constant planted in the script) now drive its real request loop under `respx`. The earlier standalone `*_coverage.py` files — an after-the-fact, line-targeting coverage pass that asserted mock-call counts and reached into private attributes — have been removed. The two largest (`test_full_coverage.py` + `test_final_coverage.py`, ~1.7k lines) and the six smaller ones (`{dashboard,pagination,repositories,router,services,store_writer}_coverage.py`, ~0.7k lines) were deleted; their behaviourally meaningful cases (typed-error wrapping in the store, `clamp_limit`/cursor round-trips, the fingerprint-id validator, repository/service DTO mapping) were folded into the matching numbered spec files, and the pure line-padding cases were dropped. The suite is now spec-first end to end.
 
@@ -300,7 +308,7 @@ uv run pytest --cov=src/slowquery_demo --cov-report=term-missing
 Render free tier via [`render.yaml`](render.yaml). Render's GitHub integration watches `main`, so **pushing is the deploy** — CI does not fire a deploy hook and there is no `RENDER_DEPLOY_HOOK` secret ([DEVIATIONS §11](docs/DEVIATIONS.md)).
 
 1. Render dashboard → **New → Blueprint** → connect this repo
-2. Fill env vars in service settings (`DATABASE_URL`, `DATABASE_URL_FAST`, `SLOWQUERY_STORE_URL`; optionally `DEMO_MUTATION_TOKEN` to enable `force-explain`)
+2. Fill env vars in service settings (`DATABASE_URL`, `DATABASE_URL_FAST`, `SLOWQUERY_STORE_URL`; `BASTION_SIGNING_KEY_PUBLIC` (or `BASTION_PUBLIC_KEY_URL`) and `SLOWQUERY_FRONTEND_SIGNING_KEY_PUBLIC`, without which protected routes answer 503; optionally `DEMO_MUTATION_TOKEN` to enable `force-explain`)
 3. Push to `main` → Render rebuilds; CI runs lint → test / integration → build in parallel. On boot, [`docker-entrypoint.sh`](docker-entrypoint.sh) runs `alembic upgrade head` against each of those databases before uvicorn starts (Render's free plan ignores `preDeployCommand`, so there is none); a failed migration stops the boot and the previous deploy keeps serving
 4. *Optional:* set a `SMOKE_BASE_URL` repository variable to the service URL and CI's `smoke` job will poll the deployed `/health` after the build. Leave it unset and the job skips (spec 12) — nothing to break.
 

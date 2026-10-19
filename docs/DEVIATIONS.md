@@ -87,7 +87,7 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 
 ## 9. State-mutating endpoints are hardened for the public URL
 
-**Context:** `DEMO_MODE=true` bypasses the platform-token middleware for every route, so on the live URL the two endpoints with lasting cross-visitor side effects were unauthenticated. `POST /_slowquery/queries/{id}/force-explain` could overwrite a genuine captured EXPLAIN plan with a synthetic stub (permanent corruption), and `POST /branches/switch` could be spammed into repeated engine-rebuild churn against free-tier Neon/Render.
+**Context (before contract v2):** `DEMO_MODE=true` bypassed the platform-token middleware for every route, so on the live URL the two endpoints with lasting cross-visitor side effects were unauthenticated. `POST /_slowquery/queries/{id}/force-explain` could overwrite a genuine captured EXPLAIN plan with a synthetic stub (permanent corruption), and `POST /branches/switch` could be spammed into repeated engine-rebuild churn against free-tier Neon/Render.
 
 **Repo ships (now):** both are gated in [`core/access.py`](../src/slowquery_demo/core/access.py), enforced *even under `DEMO_MODE`*:
 

@@ -14,8 +14,8 @@ core/           →   config (Settings), database (engine + session factory),
                      admin-token gates), errors (DomainError + exception
                      handlers), observability (the four library shims, the
                      self-instrumentation ignore list, and the drainer),
-                     platform (health, version, metrics, CORS), platform_token
-                     (X-Platform-Token verification)
+                     platform (health, version, metrics, CORS), platform_auth /
+                     platform_token / platform_keys / public_routes (contract v2)
 ```
 
 Controllers never touch the DB. Models never know about HTTP. Pure core, imperative shell.
