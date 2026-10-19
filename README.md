@@ -9,7 +9,7 @@
 ![fastapi](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![sqlalchemy](https://img.shields.io/badge/SQLAlchemy-2.0%20async-d71f00?style=flat-square)
 ![neon](https://img.shields.io/badge/Neon-Postgres-00e599?style=flat-square&logo=postgresql&logoColor=white)
-![tests](https://img.shields.io/badge/tests-271%20(221u%20+%2049i%20+%201slow)-6e9f18?style=flat-square)
+![tests](https://img.shields.io/badge/tests-308%20(250u%20+%2057i%20+%201slow)-6e9f18?style=flat-square)
 ![mypy](https://img.shields.io/badge/mypy-strict-blue?style=flat-square)
 [![ci](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdul-Muizz1310/slowquery-demo-backend/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
@@ -80,8 +80,9 @@ The demo's punchline: switch from the `slowquery` branch (no indexes, seq scans)
 - 📡 SSE stream for live p95 updates to the frontend
 - 🔀 Branch switch endpoint — swap slow ↔ fast in one POST, plus a read-only `/branches/current`
 - 🙈 Self-instrumentation filter — the pipeline never fingerprints its own bookkeeping reads or `/health`
-- 🚦 Traffic generator script for burst testing
-- 🧪 221 unit + 49 integration tests (Testcontainers), 87% unit-lane line coverage
+- 🚦 Traffic generator, run against the live URL every 6 h by a GitHub Actions schedule (`.github/workflows/traffic.yml`)
+- 🧪 250 unit + 57 integration tests (Testcontainers, both lanes in CI), 87% unit-lane line coverage
+- 🗃️ Migrations apply themselves: the container migrates the slow branch, the fast branch and the store before it serves
 - 🛡️ Pydantic v2 schemas, `Literal` types, frozen DTOs
 - 🚀 Render free tier — Render's GitHub integration auto-deploys `main` on push (no CI deploy hook)
 
@@ -179,7 +180,9 @@ src/slowquery_demo/
     └── observability.py           # 4 library shims + ignore list + drainer task
 
 alembic/versions/0001_initial.py   # full 8-table schema (commerce + bookkeeping)
-scripts/                           # seed_slow · seed_fast · traffic_generator · smoke_health
+alembic/versions/0002_dedupe_suggestions.py  # dedupe suggestions + ensure their unique constraint
+docker-entrypoint.sh               # migrate every database, then exec uvicorn
+scripts/                           # seed_slow · seed_fast · traffic_generator · smoke_health · migrate_all
 ```
 
 ---
@@ -214,11 +217,11 @@ scripts/                           # seed_slow · seed_fast · traffic_generator
 | **Framework** | FastAPI + SQLAlchemy 2.0 async + asyncpg |
 | **Middleware** | [`slowquery-detective`](https://pypi.org/project/slowquery-detective/) v0.1.0 (with 4 in-repo compatibility shims) |
 | **Database** | Neon serverless Postgres, two branches (`slowquery` / `slowquery-fast`) |
-| **Migrations** | Alembic async env, one migration (`0001_initial.py`) — full 8-table schema |
-| **Tests** | pytest + pytest-asyncio, 221 unit + 49 integration (Testcontainers), 87% unit-lane coverage |
+| **Migrations** | Alembic async env, two revisions (`0001_initial.py` full schema, `0002_dedupe_suggestions.py`), applied to every branch by the container entrypoint at boot ([spec 13](docs/specs/13-migrations-on-deploy.md)) |
+| **Tests** | pytest + pytest-asyncio, 250 unit + 57 integration (Testcontainers), 87% unit-lane coverage |
 | **Lint / Types** | ruff + mypy `--strict` on `src/` |
 | **Hosting** | Render Free tier — Render's own GitHub integration deploys `main` on push |
-| **CI** | GitHub Actions: lint → test (+ per-module coverage floors) → build → smoke (post-deploy `/health`, skipped unless `SMOKE_BASE_URL` is set) |
+| **CI** | GitHub Actions: lint → test (+ per-module coverage floors) and integration (Testcontainers) → build (boots the image against two Postgres services and checks both are migrated) → smoke (post-deploy `/health`, skipped unless `SMOKE_BASE_URL` is set); a separate `traffic` workflow drives the live URL every 6 h |
 
 ---
 
@@ -255,24 +258,25 @@ uv run python -m scripts.traffic_generator --duration 60 --users 3 --json
 #     live Render URL, so a local run against a fast Postgres will differ.
 ```
 
-Flags: `--host` (default `http://localhost:8000`), `--duration` (seconds, default 60), `--users` (default 20, sets the inter-request pacing), `--json` (print the summary line). The run populates fingerprints, samples, plans and suggestions, and exits non-zero if p95 > 30 000 ms or the failure rate > 20 % so a broken demo shows up as a red cron run on Render.
+Flags: `--host` (default `http://localhost:8000`), `--duration` (seconds, default 60), `--users` (default 20, sets the inter-request pacing), `--json` (print the summary line). The run populates fingerprints, samples, plans and suggestions, and exits non-zero if p95 > 30 000 ms or the failure rate > 20 %. [`.github/workflows/traffic.yml`](.github/workflows/traffic.yml) runs it against the live URL every six hours (and on `workflow_dispatch`) after polling `/health` until the free-tier instance is awake, so a broken demo shows up as a red run of that workflow ([spec 07](docs/specs/07-traffic-generator.md)).
 
 ---
 
 ## 🧪 Testing
 
 ```bash
-uv run pytest                                     # full suite
-uv run pytest -m "not slow and not integration"   # fast-only (CI)
+uv run pytest -m "not slow and not integration"   # unit lane (CI `test` job)
+uv run pytest -m integration --no-cov             # Testcontainers lane (CI `integration` job; needs Docker)
+uv run pytest -m slow --no-cov                    # the one subprocess-spawning slow test
 uv run pytest --cov=src/slowquery_demo --cov-report=term-missing
 ```
 
 | Metric | Value |
 |---|---|
-| **Unit tests** | 221 (unit lane, `-m "not slow and not integration"`) |
-| **Integration tests** | 49 (Testcontainers) |
+| **Unit tests** | 250 (unit lane, `-m "not slow and not integration"`) |
+| **Integration tests** | 57 (Testcontainers; CI `integration` job) |
 | **Line coverage** | **87%** (unit lane, `--cov-fail-under=80`) |
-| **Methodology** | Red-first spec-TDD. Specs `00`–`10` and `12` in `docs/specs/` enumerate their test cases before the code ships. **Spec `11` (mutation gating) is the one exception**: the code landed first in response to an audit and the spec was reconstructed from it afterwards — [it says so at the top](docs/specs/11-mutation-gating.md). |
+| **Methodology** | Red-first spec-TDD. Specs `00`–`10`, `12` and `13` in `docs/specs/` enumerate their test cases before the code ships. **Spec `11` (mutation gating) is the one exception**: the code landed first in response to an audit and the spec was reconstructed from it afterwards — [it says so at the top](docs/specs/11-mutation-gating.md). |
 
 > **Honesty note:** every test now lives in a numbered `test_NN_*.py` file, each case carrying the `docs/specs/` case it verifies. Assertions are on behaviour, not on source text — the three surviving file-content greps are the documented [no-index guards](docs/ARCHITECTURE.md), and the traffic generator's endpoint-scope tests (one of which was satisfied by a dead constant planted in the script) now drive its real request loop under `respx`. The earlier standalone `*_coverage.py` files — an after-the-fact, line-targeting coverage pass that asserted mock-call counts and reached into private attributes — have been removed. The two largest (`test_full_coverage.py` + `test_final_coverage.py`, ~1.7k lines) and the six smaller ones (`{dashboard,pagination,repositories,router,services,store_writer}_coverage.py`, ~0.7k lines) were deleted; their behaviourally meaningful cases (typed-error wrapping in the store, `clamp_limit`/cursor round-trips, the fingerprint-id validator, repository/service DTO mapping) were folded into the matching numbered spec files, and the pure line-padding cases were dropped. The suite is now spec-first end to end.
 
@@ -297,7 +301,7 @@ Render free tier via [`render.yaml`](render.yaml). Render's GitHub integration w
 
 1. Render dashboard → **New → Blueprint** → connect this repo
 2. Fill env vars in service settings (`DATABASE_URL`, `DATABASE_URL_FAST`, `SLOWQUERY_STORE_URL`; optionally `DEMO_MUTATION_TOKEN` to enable `force-explain`)
-3. Push to `main` → Render rebuilds; CI runs lint → test → build in parallel
+3. Push to `main` → Render rebuilds; CI runs lint → test / integration → build in parallel. On boot, [`docker-entrypoint.sh`](docker-entrypoint.sh) runs `alembic upgrade head` against each of those databases before uvicorn starts (Render's free plan ignores `preDeployCommand`, so there is none); a failed migration stops the boot and the previous deploy keeps serving
 4. *Optional:* set a `SMOKE_BASE_URL` repository variable to the service URL and CI's `smoke` job will poll the deployed `/health` after the build. Leave it unset and the job skips (spec 12) — nothing to break.
 
 ---

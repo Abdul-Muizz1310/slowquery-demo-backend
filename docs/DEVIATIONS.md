@@ -54,23 +54,25 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 
 **To close:** provision `OPENROUTER_API_KEY` (and `OPENROUTER_MODEL_PRIMARY`) in the Render dashboard **first**, then flip `LLM_FALLBACK_ENABLED=true` in `render.yaml` / Render env — enabling it without the key set will make the service fail fast at boot. If rules fire on a plan the drainer will skip the LLM entirely; if they don't, the drainer will call the library's `explain()` function and persist any resulting suggestion alongside rule-produced ones.
 
-## 6. `render.yaml` `preDeployCommand` is silently ignored on Free tier
+## 6. Migrations: `preDeployCommand` was ignored, and an applied migration was edited (closed 2026-10-20)
 
 **Spec says (implicitly):** Render runs `alembic upgrade head` as a pre-deploy step.
-**Reality:** `preDeployCommand` is gated behind Render paid tiers. On Free the field is accepted by the YAML parser but never executed. First migration ran manually from a dev machine.
+**What happened:** `preDeployCommand` is gated behind Render's paid plans; on Free the field is parsed and never executed, so `0001` was applied to both Neon branches by hand on 2026-04-12. The next day `0001_initial.py` was *edited* to add `uq_suggestions_fp_kind_sql`, and the store writer's insert became `ON CONFLICT (fingerprint_id, kind, sql) DO NOTHING` in the same commit. Alembic never re-runs a recorded revision, so the live branches never got the constraint: duplicate suggestions accumulated (one fingerprint listed `ix_orders_created_at` three times), and every later suggestion insert failed, because `ON CONFLICT (cols)` needs a matching unique constraint. Fresh Testcontainers databases got the constraint from the edited file, so no test ever saw either symptom.
 
-**Full write-up with Option A/B/C trade-off table:** [`docs/RENDER_FREE_TIER_MIGRATIONS.md`](RENDER_FREE_TIER_MIGRATIONS.md).
+**Repo ships (now):** [spec 13](specs/13-migrations-on-deploy.md).
 
-**To close:** move alembic into the Dockerfile `CMD` when schema churn picks up (see the doc for the exact shape).
+- `alembic/versions/0002_dedupe_suggestions.py` locks `suggestions`, deletes every duplicate except the lowest `id` of each `(fingerprint_id, kind, sql)` group, and adds the constraint only where it is missing — correct on the live branches (no constraint) and on fresh databases (constraint from the edited `0001`). `0001` is pinned by hash in a unit test so it cannot be edited again.
+- [`docker-entrypoint.sh`](../docker-entrypoint.sh) runs [`scripts/migrate_all.py`](../scripts/migrate_all.py) before uvicorn: `alembic upgrade head` against `DATABASE_URL`, `DATABASE_URL_FAST` and `SLOWQUERY_STORE_URL` (each distinct database once). A failure stops the boot, so Render keeps the previous deploy serving. `render.yaml` no longer declares `preDeployCommand`.
+- Verified against real Postgres in the integration lane (fresh and live-shaped databases, re-runs, downgrade, both branches in one run) and, in CI's `build` job, by booting the built image against two empty Postgres services.
 
-## 7. Integration lane is committed but Docker-gated
+**Remaining cost:** every cold boot pays for one `alembic upgrade head` per database (a no-op at head, about a second each over Neon). [`RENDER_FREE_TIER_MIGRATIONS.md`](RENDER_FREE_TIER_MIGRATIONS.md) keeps the original option analysis.
+
+## 7. Integration lane runs in CI (closed 2026-10-20)
 
 **Spec implies:** full test matrix runs in CI.
-**Repo ships:** 221 unit tests run in CI on every push; 49 integration tests live under `tests/integration/` and are filtered out of the default run. They're committed and would work locally given a running Docker Desktop — the session-scoped `pg_container` fixture boots a Testcontainers Postgres, `alembic upgrade head` runs against it via subprocess to avoid event-loop collision with pytest-asyncio.
+**Used to ship:** the integration tests under `tests/integration/` were committed but filtered out of every CI run ("Docker Desktop wasn't running on my dev laptop").
 
-**Why:** Docker Desktop wasn't running on my dev laptop during S5a when the conftest landed. Adding a CI job that boots Docker-in-Docker is a separate line item.
-
-**To close:** add a second CI job that runs `uv run pytest -m integration` with a `services.postgres` entry or a Docker-in-Docker setup. The fixture is ready for it.
+**Repo ships (now):** [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) has an `integration` job that runs `uv run pytest -m integration` on the GitHub runner's Docker, so every push and pull request runs the Testcontainers lane (two `postgres:16-alpine` containers: the slow and the fast branch). The unit lane and its coverage floors are unchanged.
 
 ## 8. Four live production bugs fixed by in-repo shims rather than upstream PRs
 
@@ -97,17 +99,15 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 
 **Note vs. the audit's wording:** the fix is implemented as route-level dependencies rather than special-casing paths inside the token middleware — it achieves the same "require a secret for mutation even in demo mode" intent while keeping the middleware single-purpose.
 
-## 10. Traffic generator is httpx-based, not a Locust file
+## 10. Traffic generator is httpx-based, not a Locust file run by a Render cron (spec rewritten 2026-10-20)
 
-**Spec says** ([`docs/specs/07-traffic-generator.md`](specs/07-traffic-generator.md)): the deliverable is "a Locust file (`from locust import HttpUser, task, between`) plus a thin `__main__` that runs it headless against a configurable `--host`" (spec 07 line 9), the generator "runs headless (`--headless`)" (invariant 2), stdout is "metrics from Locust" (line 11), and "Locust's stats upload endpoints are disabled (`--no-web` is implied by `--headless`)" (test 14).
+**Spec used to say:** the deliverable was "a Locust file (`from locust import HttpUser, task, between`) plus a thin `__main__` that runs it headless", run by "a Render cron worker configured in `render.yaml` (`type: cron`, schedule `0 * * * *`)", with exit codes that would surface "as a red cron run in Render".
 
-**Repo ships:** [`scripts/traffic_generator.py`](../scripts/traffic_generator.py) is a single-file **httpx** driver. `locust` is not a dependency (`grep -rn locust src/ scripts/` finds no import) and there is no `HttpUser` / `@task` class. The CLI is `--host`, `--duration`, `--users`, `--json` — there is no `--headless`, no `--no-web`, no `--spawn-rate`, and the env vars the spec names (`TARGET_URL`, `TRAFFIC_DURATION_SECONDS`, `TRAFFIC_USERS`, `TRAFFIC_SPAWN_RATE`) are not read; `--host` defaults to `http://localhost:8000` in code. Output under `--json` is one line from this repo, not Locust: `{"total", "failures", "p95_ms", "exit_code"}`.
+**Repo ships:** [`scripts/traffic_generator.py`](../scripts/traffic_generator.py) is a single-file **httpx** driver (`--host`, `--duration`, `--users`, `--json`; no `locust` dependency, no `TRAFFIC_*` env vars), and there was never a Render cron service. For months nothing generated traffic on a schedule at all: the live dashboard's newest sample was from 2026-08-02. [`.github/workflows/traffic.yml`](../.github/workflows/traffic.yml) now runs the driver every six hours (and on demand) against the live URL, after waking the free-tier service with spec 12's `/health` poller; the driver's exit code makes a broken demo a red Actions run.
 
-**Why:** the whole generator is ~200 lines of `asyncio` + `httpx`, and `httpx` is already a runtime dependency (the app ships it). Adding Locust would add a heavyweight test-only dependency, a gevent-based worker model that fights `asyncio`, and a web UI whose only role would be to be switched off. Spec invariant 4's health-signal contract (exit non-zero when p95 > 30 000 ms or failure rate > 20 %) is what actually matters for the Render cron worker, and `exit_code_for_stats` implements it directly.
+**Why httpx:** the generator is ~200 lines of `asyncio` + `httpx`, and `httpx` is already a runtime dependency. Locust would add a heavyweight dependency, a gevent worker model that fights `asyncio`, and a web UI whose only role would be to be switched off. Why GitHub Actions instead of a Render cron: a Render cron job is a separately billed service, and the workflow needs no secret because the commerce routes it calls are public.
 
-**What this cost:** spec 07's Locust-specific invariants have no implementation to point at. Test 14 (`--no-web` implied by `--headless`) was for a while satisfied by a dead `_GREP_MARKER_HEADLESS = "--headless"` constant planted in the script purely so a source-grep assertion would pass — a test asserting a literal instead of behaviour. Both the constant and the grep assertions are gone: spec 07 tests 3 / 12 / 13 / 14 now drive `_run_driver` under `respx` and assert on the requests the loop actually issues (commerce paths only, `GET` only, no `X-Platform-Token`, terminates at the `--duration` deadline). "Headless" is not a mode here — it is the only mode, since there is no web UI to disable.
-
-**To close:** either rewrite the script as a real Locust file and keep the spec, or rewrite spec 07 around the httpx driver (weights, `--json` shape, exit-code contract) and drop the Locust language. The second is the honest option; it is not done yet because the spec doubles as the record of what was originally promised.
+**Closed by:** [spec 07](specs/07-traffic-generator.md) was rewritten around what ships (driver, task mix, `--json` shape, exit-code contract, the schedule) and the Locust language dropped. Test numbers 1–14 kept their meaning; tests 15–18 pin the workflow.
 
 ## 11. There is no CI deploy job — Render auto-deploys `main` itself
 
