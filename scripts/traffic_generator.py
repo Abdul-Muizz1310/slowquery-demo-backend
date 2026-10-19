@@ -1,17 +1,17 @@
 """Traffic generator for the slowquery demo service.
 
 A tiny httpx-based driver that hits the seeded demo endpoints with a
-weighted task mix. Designed to run as a Render cron worker on an
-hourly schedule (60 seconds per burst) so dashboards stay alive
-even when the demo is sleeping between visitors.
+weighted task mix. ``.github/workflows/traffic.yml`` runs it against the
+live service every six hours (60 seconds per run, after waking the
+free-tier instance) so the dashboard never shows stale data for long.
 
 The generator never hits platform / slowquery / branches endpoints —
 it produces realistic commerce traffic and nothing else. That contract
 is pinned by driving this module's real request loop under ``respx``
 (``tests/unit/test_07_traffic_generator.py``), not by grepping the source.
 
-Spec 07 specifies a Locust driver; this is an httpx one. The divergence
-(and what it costs) is recorded in ``docs/DEVIATIONS.md`` §10.
+Spec 07 describes this driver and its schedule; the original Locust plan
+it replaced is recorded in ``docs/DEVIATIONS.md`` §10.
 """
 
 from __future__ import annotations

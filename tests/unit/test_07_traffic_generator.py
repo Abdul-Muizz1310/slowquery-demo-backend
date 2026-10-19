@@ -158,7 +158,7 @@ async def test_driver_never_switches_branches(respx_mock) -> None:  # type: igno
 
 
 async def test_no_platform_token_header_sent(respx_mock) -> None:  # type: ignore[no-untyped-def]
-    """Spec 07 test 13: the generator relies on DEMO_MODE, never on a token.
+    """Spec 07 test 13: the generator never sends a token (it calls public routes).
 
     Asserted on the wire, so a header added by a future client tweak (default
     headers, an auth hook) is caught even though the literal string would not

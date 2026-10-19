@@ -1,77 +1,108 @@
-# Spec 07 — Traffic generator
+# Spec 07 — Traffic generator and scheduled traffic
 
-> **Implementation diverges from this spec.** Everything below specifies a **Locust** driver. What ships is
-> a single-file **httpx** driver with the flags `--host / --duration / --users / --json` — no `locust`
-> dependency, no `HttpUser`, no `--headless`, no `--no-web`, and none of the `TRAFFIC_*` env vars. The spec
-> is kept as the record of what was promised; the divergence, its cost, and the two ways to close it are in
-> [DEVIATIONS §10](../DEVIATIONS.md). Read the Locust-specific parts below (deliverable, invariant 2,
-> test 14) as *not implemented as written*.
+> **Rewritten 2026-10-20 to describe what ships.** The first version of this spec promised a Locust file run
+> by a Render cron worker. Neither was built: the driver is a single-file **httpx** script, and Render's
+> free plan has no cron service in this blueprint. The history of that gap is
+> [DEVIATIONS §10](../DEVIATIONS.md). Test numbers 1–14 keep their old meaning where the behaviour is the
+> same, so the docstrings in `tests/**/test_07_traffic_generator.py` still point at the right case.
 
 ## Goal
 
-Produce a continuous stream of realistic HTTP traffic against the deployed demo service so that when someone opens the dashboard cold, there are already fingerprints, rolling p95 stats, explain plans, and suggestions to look at. The generator also has to produce the specific query shapes the rules engine is designed to catch: seq scans on `orders.user_id`, seq scans on `order_items.{order_id,product_id}`, an `ORDER BY created_at` without a composite index, and an N+1 pattern (many `/users/{id}/orders` calls in a short burst). Without this the demo is a museum piece — the first person to load it sees an empty dashboard.
+Produce realistic commerce traffic against the demo service so that someone opening the dashboard cold
+finds fingerprints, rolling p95 stats, EXPLAIN plans and suggestions, not an empty table. The traffic has to
+include the query shapes the rules engine is built to catch: scans on `orders.user_id` and
+`order_items.{order_id,product_id}`, an `ORDER BY created_at` with no index, and an N+1-style burst of
+`/users/{id}/orders` calls.
 
-## Inputs / Outputs
+Two pieces ship:
 
-- **Deliverable:** `scripts/traffic_generator.py` — a Locust file (`from locust import HttpUser, task, between`) plus a thin `__main__` that runs it headless against a configurable `--host`.
-- **In:** `TARGET_URL` (env, defaults to `http://localhost:8000`), `TRAFFIC_DURATION_SECONDS` (default 60), `TRAFFIC_USERS` (default 20), `TRAFFIC_SPAWN_RATE` (default 5 users/s).
-- **Out:** stdout metrics from Locust (JSON when `--json` flag is passed), exit `0` on success.
-- **Deployment:** Render cron worker configured in `render.yaml` (`type: cron`, schedule `0 * * * *` — hourly 60-second burst). The cron job runs `uv run python scripts/traffic_generator.py --host $TARGET_URL --json`.
+1. `scripts/traffic_generator.py` — the driver, run by hand or by the schedule.
+2. `.github/workflows/traffic.yml` — a GitHub Actions schedule that wakes the live service and runs the
+   driver against it every six hours, so the live dashboard never shows data older than about six hours.
 
-## Traffic shape (the point of the whole script)
+## The driver
 
-| Pattern | Endpoint | Weight | Rule it should fire on slow branch |
+- **CLI:** `python -m scripts.traffic_generator [--host URL] [--duration S] [--users N] [--json]`.
+  Defaults: `--host http://localhost:8000`, `--duration 60`, `--users 20` (sets pacing: one task every
+  `1/users` seconds), `--json` off. No environment variables are read.
+- **Client:** one `httpx.AsyncClient(base_url=host, timeout=5.0)`. Before the loop it prefetches
+  `GET /users?limit=20` and `GET /products?limit=20` and keeps the returned ids, so tasks hit rows that
+  exist. With an empty seed it falls back to random UUIDs (the requests then 404, which still exercises the
+  queries).
+- **Task mix** (weights are named constants in the script):
+
+| Task | Requests | Weight | Query shape on the slow branch |
 |---|---|---|---|
-| User profile lookup | `GET /users/{id}` | 10 | — (fast path) |
-| **Seq scan on `orders.user_id`** | `GET /users/{id}/orders` | 25 | `seq_scan_large_table` |
-| **ORDER BY without index** | `GET /orders` (returns recent orders) | 15 | `sort_without_index` |
-| **Seq scan on `order_items.order_id`** | `GET /orders/{id}` (joins to items) | 20 | `seq_scan_large_table` |
-| **Seq scan on `order_items.product_id`** | `GET /order_items?product_id=...` | 15 | `seq_scan_large_table` |
-| **N+1 burst** | 50× `GET /users/{id}/orders` in 1 second | 5 | `n_plus_one` |
-| Product lookup | `GET /products/{id}` | 10 | — (fast path) |
+| `user_profile` | `GET /users/{id}` | 10 | primary-key lookup (fast path) |
+| `user_orders` | `GET /users/{id}/orders` | 25 | scan on `orders.user_id` |
+| `recent_orders` | `GET /orders?limit=20` | 15 | `ORDER BY created_at` without an index (`sort_without_index`) |
+| `order_with_items` | `GET /orders?limit=5`, then `GET /orders/{id}` | 20 | scan on `order_items.order_id` |
+| `items_by_product` | `GET /order_items?product_id=…` | 15 | scan on `order_items.product_id` |
+| `n_plus_one_burst` | 50 × `GET /users/{id}/orders`, sequential | 5 | many calls of one fingerprint |
+| `product_profile` | `GET /products/{id}` | 10 | primary-key lookup (fast path) |
 
-Weights sum to 100 for readability. `HttpUser` tasks use the `@task(weight)` decorator with these weights.
+- **Output:** with `--json`, one line `{"total", "failures", "p95_ms", "exit_code"}`. `p95_ms` is wall-clock
+  per task from the caller's side. A transport error (timeout, refused connection) counts as a failure; an
+  HTTP 4xx/5xx does not.
+- **Exit code:** `1` when no task ran, when the failure rate exceeds 20 %, or when p95 exceeds 30 000 ms;
+  otherwise `0`. A broken demo therefore shows up as a red run wherever the driver is scheduled.
 
-Every random id used by the tasks is drawn from two small arrays prefetched at `on_start`: `self.known_user_ids`, `self.known_product_ids` (20 of each — the generator does a one-time `GET /users?limit=20` and `GET /products?limit=20` on user start, storing the returned ids). This avoids 404-storming the service with UUIDs that don't exist.
+## The schedule
+
+`.github/workflows/traffic.yml`:
+
+- **Triggers:** `schedule` with cron `0 */6 * * *` (every six hours, UTC) and `workflow_dispatch`. Nothing
+  else: it never runs on `push` or `pull_request`, so a fork or a feature branch cannot spend the live
+  service's free-tier hours.
+- **Target:** exactly `https://slowquery-demo-backend.onrender.com`, a constant in the workflow, not a secret
+  or variable.
+- **Wake first:** Render's free instance sleeps after 15 idle minutes and takes up to about 90 s to boot. A
+  wake step runs `scripts/smoke_health.py` (spec 12) with `SMOKE_BASE_URL` set to the target, polling
+  `/health` with a budget of at least 90 s (`SMOKE_ATTEMPTS × SMOKE_DELAY_S`). If the service never becomes
+  healthy the job fails there, before generating traffic.
+- **Then drive:** `python -m scripts.traffic_generator --host <target> --duration 60 --users 3 --json`. The
+  driver's exit code is the step's exit code.
+- **Hygiene:** `permissions: contents: read`, a job `timeout-minutes`, and a `concurrency` group so a manual
+  run and a scheduled one never overlap. The workflow references no secrets: the routes it calls are the
+  public read-only commerce routes (platform-contract-v2 §2), so it needs no token.
 
 ## Invariants
 
-1. The generator **never** hits `/health`, `/_slowquery/*`, or `/branches/switch`. The point is to produce observability load against the commerce endpoints only.
-2. The generator runs headless (`--headless`) and terminates cleanly after `TRAFFIC_DURATION_SECONDS`. It does not loop forever — the cron worker handles repetition.
-3. Each `HttpUser` task handles 4xx responses gracefully (logs at `info`, does not retry, does not crash the task). The service's pagination cap (Spec 04 test 13) is not a bug, it's a check.
-4. The generator's 5xx rate is a health signal: the Locust run's exit code becomes non-zero if p95 > 30000ms OR failure rate > 20%, so a catastrophically broken demo surfaces as a red cron run in Render.
-5. The N+1 burst task uses `asyncio.gather` or Locust's `task` decorator with an explicit for-loop; it must result in ≥50 fingerprint samples for the same parameterized query within 1 second (so the library's N+1 rule fires).
-6. The generator itself does not assume anything about the active branch. It issues the same traffic in both modes. The difference between `slow` and `fast` is **only** visible in the slowquery dashboard, not in the generator's output.
-7. The `--host` flag is respected in both local-dev and Render-cron-worker modes. Render config injects `TARGET_URL`; the script falls back to `http://localhost:8000` when running locally.
+1. The driver only issues `GET` requests to the commerce routes (`/users…`, `/products…`, `/orders…`,
+   `/order_items…`). It never calls `/health`, `/version`, `/metrics`, `/_slowquery/*` or `/branches/*`, and
+   never sends a write.
+2. The driver stops at its `--duration` deadline; it does not loop forever. Repetition is the schedule's job.
+3. The driver never sends an `X-Platform-Token` (it has none to send).
+4. The driver's exit code is the health signal of invariant "exit code" above.
+5. The driver is branch-agnostic: the same traffic in `slow` and `fast` mode; the difference shows only in
+   the dashboard.
+6. The schedule wakes the service before driving it, and targets only the live URL.
 
 ## Test cases
 
-**Success (unit — pure helpers, no HTTP):**
-1. `choose_weighted(rng, tasks)` returns each task with probability proportional to its weight across 10k samples (binomial test within expected range).
-2. `parse_args([])` returns defaults; `parse_args(["--users", "50", "--json"])` overrides them.
-3. The list of enabled tasks does not include `/health` or `/_slowquery/*` (grep self-test on the task method names).
+**Unit (driver — no network; `respx` intercepts httpx):**
+1. `choose_weighted` returns each task in proportion to its weight over 10k samples.
+2. `parse_args([])` returns the defaults; `parse_args(["--users", "50", "--json"])` overrides them.
+3. Running `_run_driver` issues requests only to commerce paths (invariant 1).
+8. An unreachable `--host` exits `1` (`@slow`: spawns a subprocess).
+9. Stats with p95 > 30 000 ms → exit `1`.
+10. Stats with failure rate > 20 % → exit `1`.
+11. Empty seed data: the driver still runs, using fallback ids.
+12. No request is a write and none touches `/branches/*` (invariant 1).
+13. No request carries `X-Platform-Token` (invariant 3).
+14. The driver terminates at its deadline (invariant 2).
 
-**Success (integration — real service, mocked upstream via `TestClient` or a live local uvicorn):**
-4. Running `traffic_generator --host http://localhost:<port> --users 2 --duration 10` against a running demo service produces ≥1 request of each of the 7 task types within the 10-second window.
-5. After the run, `GET /_slowquery/queries` returns ≥5 distinct fingerprints.
-6. The N+1 burst task produces ≥50 samples for the same fingerprint within a single second (verified by inspecting `query_samples.sampled_at`).
-7. With `DEMO_MODE=false`, the generator still runs — it doesn't depend on demo mode.
+**Integration (Testcontainers Postgres + a live local uvicorn):**
+4. A 10-second run produces at least one request of each task type.
+5. After a run, `GET /_slowquery/queries` lists at least five fingerprints.
+6. The N+1 burst puts at least five samples of one fingerprint into one clock second.
+7. The driver runs unchanged against a service with `DEMO_MODE=false`.
 
-**Failure / negative:**
-8. Running with an invalid `--host` (unreachable) exits `1` with a clear error and does not silently log `0 requests succeeded`.
-9. A run where p95 > 30000ms exits `1` (health signal invariant 4).
-10. A run where failure rate > 20% exits `1` (health signal invariant 4).
-11. If `/users?limit=20` returns an empty list (fresh unseeded DB), the generator exits `1` with "no seed data, run scripts/seed_slow.py first".
-
-**Security / destructive-guard:**
-12. The generator does not `POST /branches/switch`. A grep self-test asserts `/branches/switch` does not appear in the script.
-13. The generator does not send an `X-Platform-Token` header — it relies on `DEMO_MODE=true` accepting any token. In a hypothetical non-demo deployment, the generator would 403 loud, which is a feature: no one runs this against production.
-14. Locust's stats upload endpoints are disabled (`--no-web` is implied by `--headless`).
-
-## Acceptance
-
-- [ ] `scripts/traffic_generator.py` is a single-file Locust driver + `__main__`.
-- [ ] Renders `render.yaml` includes a `type: cron` worker entry pointing at this script with the hourly schedule.
-- [ ] Every task weight above is a named constant (`WEIGHT_USER_PROFILE = 10`, etc.) — not magic numbers inline.
-- [ ] Every test case above has a corresponding test.
-- [ ] The generator's first run after a successful deploy produces ≥3 suggestions in the `suggestions` table — verified by the S6 acceptance script.
+**Unit (schedule — the workflow file, parsed as YAML):**
+15. Triggers are exactly `schedule` (one cron, `0 */6 * * *`) and `workflow_dispatch`.
+16. The wake step runs `scripts.smoke_health` with `SMOKE_BASE_URL` equal to the target and a polling budget
+    of at least 90 s, and comes before the traffic step.
+17. The traffic step runs `scripts.traffic_generator` with `--host` equal to the target, a positive
+    `--duration`, and `--json`.
+18. The target is `https://slowquery-demo-backend.onrender.com`; the workflow mentions no `secrets.`, has
+    `permissions: contents: read`, a job timeout and a concurrency group.

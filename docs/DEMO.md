@@ -92,6 +92,8 @@ uv run python scripts/traffic_generator.py \
 # {"total": 36, "failures": 0, "p95_ms": 14062.000000005355, "exit_code": 0}
 ```
 
+The same command runs every six hours from [`.github/workflows/traffic.yml`](../.github/workflows/traffic.yml) (after polling `/health` until the free-tier instance is awake), so the live dashboard is never more than about six hours stale; trigger it by hand with `gh workflow run traffic.yml`.
+
 The generator is weighted toward the slow paths: `GET /users/{id}/orders` (25%), `GET /orders` (15%), `GET /orders/{id}` (20%), `GET /order_items?product_id=...` (15%), N+1 burst (5%), plus fast paths for `GET /users/{id}` and `GET /products/{id}`.
 
 **The exit code is a tripwire, not a pass/fail on the demo.** It is `1` when p95 crosses 30 000 ms or the failure rate crosses 20 %. Whether it fires depends on whether the N+1 burst task (50 serial `GET /users/{id}/orders` calls over the laptop → Render → Neon round-trip) got picked inside the window and how warm the container was: an earlier documented run on a cold container produced `{"total": 19, "failures": 1, "p95_ms": 41969.0, "exit_code": 1}`, the run above on a warm one produced `exit_code: 0`. Traffic flows and the observability pipeline fills either way. See [DEVIATIONS.md §2](DEVIATIONS.md) for why the N+1 rule still does not fire.

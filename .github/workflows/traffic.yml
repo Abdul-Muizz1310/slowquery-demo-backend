@@ -1,0 +1,49 @@
+name: traffic
+
+# Scheduled traffic for the live demo (spec 07). Every six hours: wake the
+# free-tier Render service, then run the traffic generator against its public,
+# read-only commerce routes for 60 seconds, so the dashboard's fingerprints,
+# percentiles and suggestions are never more than about six hours old.
+#
+# No push / pull_request trigger on purpose: a fork or a feature branch must
+# never spend the live service's free hours. No secrets: the routes it calls
+# are public (platform-contract-v2 §2).
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: traffic
+  cancel-in-progress: false
+
+env:
+  TARGET_URL: https://slowquery-demo-backend.onrender.com
+
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.12
+      - run: uv sync --frozen --no-dev
+
+      # Render's free instance sleeps after 15 idle minutes and needs up to
+      # ~90 s to boot. Poll /health (spec 12's checker) for up to 12 x 15 s
+      # before generating traffic; fail here if it never comes up.
+      - name: Wake the service
+        env:
+          SMOKE_BASE_URL: ${{ env.TARGET_URL }}
+          SMOKE_ATTEMPTS: "12"
+          SMOKE_DELAY_S: "15"
+        run: uv run --no-dev python -m scripts.smoke_health
+
+      # Exits non-zero when p95 > 30 s or more than 20 % of tasks fail, so a
+      # broken demo shows up as a red run here.
+      - name: Drive commerce traffic
+        run: uv run --no-dev python -m scripts.traffic_generator --host ${{ env.TARGET_URL }} --duration 60 --users 3 --json
