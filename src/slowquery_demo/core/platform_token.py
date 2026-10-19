@@ -58,15 +58,11 @@ class InvalidPlatformTokenError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Principal:
-    """Who an authenticated request is: the rate-limit bucket is ``iss:sub``."""
+    """Who an authenticated request is (its rate-limit bucket: ``access.rate_limit_key``)."""
 
     iss: Issuer
     sub: str
     role: str | None
-
-    @property
-    def bucket(self) -> str:
-        return f"{self.iss}:{self.sub}"
 
 
 @dataclass(frozen=True, slots=True)

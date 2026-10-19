@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
 
-from slowquery_demo.core.platform_token import Principal
+from slowquery_demo.core.platform_token import BASTION_ISS, Principal
 
 if TYPE_CHECKING:
     from slowquery_demo.core.config import Settings
@@ -67,21 +67,31 @@ class CooldownLimiter:
         return True
 
 
-def rate_limit_key(request: Request) -> str:
-    """The cooldown bucket (spec 14): ``iss:sub`` when authenticated.
-
-    Otherwise the leftmost ``X-Forwarded-For`` address (the visitor, behind
-    Render's proxy or the dashboard's signed proxy), else the socket peer.
-    """
-    principal: Principal | None = getattr(request.state, "platform_principal", None)
-    if principal is not None:
-        return principal.bucket
+def _client_address(request: Request) -> str:
+    """The leftmost ``X-Forwarded-For`` address, else the socket peer."""
     forwarded = request.headers.get("x-forwarded-for", "")
     leftmost = forwarded.split(",")[0].strip()
     if leftmost:
         return leftmost
     client = request.client
     return client.host if client is not None else "unknown"
+
+
+def rate_limit_key(request: Request) -> str:
+    """The cooldown bucket (spec 14, contract v2 §2 as amended 2026-10-20).
+
+    * bastion's key: ``bastion:{sub}`` (``sub`` is the visitor pseudonym);
+    * the dashboard's key: ``slowquery-frontend:{address}``. A frontend's
+      ``sub`` is constant, so keying on it would put every visitor of the site
+      in one bucket; its proxy forwards exactly one client address;
+    * anonymous: the address alone.
+    """
+    principal: Principal | None = getattr(request.state, "platform_principal", None)
+    if principal is None:
+        return _client_address(request)
+    if principal.iss == BASTION_ISS:
+        return f"{BASTION_ISS}:{principal.sub}"
+    return f"{principal.iss}:{_client_address(request)}"
 
 
 def _get_settings(request: Request) -> Settings:

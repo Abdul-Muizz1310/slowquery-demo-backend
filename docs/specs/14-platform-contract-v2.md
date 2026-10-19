@@ -56,9 +56,12 @@ sub-paths), `/` (a redirect to `/docs`), and the read-only commerce routes for `
 `DEMO_MODE` defaults to `false`. The mutation gates of spec 11 (cooldown, `DEMO_MUTATION_TOKEN`) still
 apply on top of authentication.
 
-**Rate limiting.** The spec-11 cooldown buckets on `"{iss}:{sub}"` for an authenticated request, else on
-the leftmost `X-Forwarded-For` address, else the socket peer. uvicorn runs with
-`--proxy-headers --forwarded-allow-ips='*'` behind Render.
+**Rate limiting** (contract §2 as amended 2026-10-20). The spec-11 cooldown buckets a bastion-key request
+on `"bastion:{sub}"` (the visitor pseudonym) and a frontend-key request on
+`"slowquery-frontend:{address}"`, where the address is the leftmost `X-Forwarded-For` entry (the
+dashboard's proxy forwards exactly one, the visitor's), else the socket peer: a frontend's `sub` is
+constant, so keying on it would put every dashboard visitor in one bucket. An anonymous request buckets on
+the address alone. uvicorn runs with `--proxy-headers --forwarded-allow-ips='*'` behind Render.
 
 **CORS.** Allowed request headers are exactly `x-platform-token`, `x-request-id`, `content-type`,
 `authorization` and `x-admin-token`. CORS is the outermost middleware, so a preflight never reaches the
@@ -85,7 +88,9 @@ Conformance (the workspace contract's §3, numbered as there), against `create_a
 11. present-but-invalid token with `DEMO_MODE=true` ⇒ 401 invalid.
 12. no trusted key (`APP_ENV` not `test`) ⇒ 503 on a protected route, 200 on `/health`.
 13. every public route answers without a token.
-14. the rate-limit key is `iss:sub` for an authenticated request.
+14. the rate-limit key is `bastion:{sub}` for a bastion token and `slowquery-frontend:{forwarded address}`
+    for a frontend token: two visitors through the dashboard land in different buckets, one visitor
+    keeps its bucket across addresses only with a bastion token.
 
 slowquery-specific:
 

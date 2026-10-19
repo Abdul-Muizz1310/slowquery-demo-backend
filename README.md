@@ -209,11 +209,11 @@ Every route except the public ones needs a platform token (contract v2, [spec 14
 | `GET` | `/_slowquery/queries/{id}` | token | Full detail for one fingerprint (plan, samples, suggestions) |
 | `POST` | `/_slowquery/queries/{id}/force-explain` | token + `X-Admin-Token` | 🔒 Re-analyze (fails closed unless `DEMO_MUTATION_TOKEN` is set) |
 | `GET` | `/_slowquery/api/stream` | token | 📡 SSE — live p95 updates per fingerprint |
-| `POST` | `/branches/switch` | token | Switch between `slow` and `fast` Neon branch (cooldown per `iss:sub`) |
+| `POST` | `/branches/switch` | token | Switch between `slow` and `fast` Neon branch (cooldown per visitor) |
 | `GET` | `/branches/current` | token | Active branch — read-only, not throttled |
 | `GET` | `/docs`, `/redoc`, `/openapi.json`, `/metrics` | public | OpenAPI UI (`/` redirects here), Prometheus |
 
-> 🔒 The two state-mutating endpoints (`force-explain`, `branches/switch`) are hardened for the public URL on top of the token: a cooldown (`DEMO_MUTATION_COOLDOWN_S`) bucketed on the caller's `iss:sub` (or, anonymous, its leftmost `X-Forwarded-For` address), and the destructive `force-explain` fails closed unless `DEMO_MUTATION_TOKEN` is set. See [DEVIATIONS](docs/DEVIATIONS.md).
+> 🔒 The two state-mutating endpoints (`force-explain`, `branches/switch`) are hardened for the public URL on top of the token: a cooldown (`DEMO_MUTATION_COOLDOWN_S`) bucketed per visitor (`bastion:{sub}` for a bastion token, the dashboard proxy's forwarded visitor address for a dashboard token, the leftmost `X-Forwarded-For` address when anonymous), and the destructive `force-explain` fails closed unless `DEMO_MUTATION_TOKEN` is set. See [DEVIATIONS](docs/DEVIATIONS.md).
 
 ---
 

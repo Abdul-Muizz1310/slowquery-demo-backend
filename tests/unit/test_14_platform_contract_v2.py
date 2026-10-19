@@ -322,25 +322,28 @@ def test_13_public_routes_stay_public_with_no_key_configured() -> None:
         assert client.get(path, follow_redirects=False).status_code not in (401, 503), path
 
 
-def test_14_rate_limit_key_is_iss_and_sub() -> None:
+def test_14_rate_limit_key_bastion_sub_and_frontend_address() -> None:
+    """Contract §2 as amended 2026-10-20: bastion:{sub}; frontend {iss}:{forwarded address}."""
     client = _client(DEMO_MUTATION_COOLDOWN_S="60")
 
-    def switch(token: str, ip: str, target: str) -> int:
-        resp = client.post(
-            "/branches/switch",
-            json={"target": target},
-            headers={"X-Platform-Token": token, "X-Forwarded-For": ip},
-        )
-        return resp.status_code
+    def switch(token: str, ip: str | None, target: str) -> int:
+        headers = {"X-Platform-Token": token}
+        if ip is not None:
+            headers["X-Forwarded-For"] = ip
+        return client.post("/branches/switch", json={"target": target}, headers=headers).status_code
 
-    alice = _mint(sub="v_alice00000")
-    assert switch(alice, "203.0.113.1", "fast") == 200
-    # Same principal from another address: same bucket.
+    # bastion: the bucket follows the visitor pseudonym, not the address.
+    assert switch(_mint(sub="v_alice00000"), "203.0.113.1", "fast") == 200
     assert switch(_mint(sub="v_alice00000"), "198.51.100.9", "slow") == 429
-    # Another principal from the first address: its own bucket.
     assert switch(_mint(sub="v_bob0000000"), "203.0.113.1", "slow") == 200
-    # Same sub, other issuer: another bucket too.
-    assert switch(_frontend_token(sub="v_alice00000"), "203.0.113.1", "fast") == 200
+
+    # frontend: sub is constant, so two visitors through the dashboard get two buckets...
+    assert switch(_frontend_token(), "192.0.2.10", "fast") == 200
+    assert switch(_frontend_token(), "192.0.2.11", "slow") == 200
+    # ...and one visitor keeps its own bucket.
+    assert switch(_frontend_token(), "192.0.2.10", "slow") == 429
+    # A frontend visitor and a bastion visitor never share a bucket.
+    assert switch(_mint(sub="slowquery-frontend"), "192.0.2.10", "fast") == 200
 
 
 # --- slowquery-specific ------------------------------------------------------
@@ -548,10 +551,15 @@ def test_22_rate_limit_key_function() -> None:
     assert rate_limit_key(request({})) == "192.0.2.7"
     assert rate_limit_key(request({"X-Forwarded-For": " 203.0.113.5 , 10.0.0.1"})) == "203.0.113.5"
     assert rate_limit_key(request({"X-Forwarded-For": " , "})) == "192.0.2.7"
-    principal = Principal(iss="bastion", sub="v_abcdefghij", role="viewer")
-    assert rate_limit_key(request({"X-Forwarded-For": "1.2.3.4"}, principal)) == (
+    bastion = Principal(iss="bastion", sub="v_abcdefghij", role="viewer")
+    assert rate_limit_key(request({"X-Forwarded-For": "1.2.3.4"}, bastion)) == (
         "bastion:v_abcdefghij"
     )
+    frontend = Principal(iss="slowquery-frontend", sub="slowquery-frontend", role="frontend")
+    assert rate_limit_key(request({"X-Forwarded-For": "1.2.3.4, 10.0.0.1"}, frontend)) == (
+        "slowquery-frontend:1.2.3.4"
+    )
+    assert rate_limit_key(request({}, frontend)) == "slowquery-frontend:192.0.2.7"
 
 
 def test_23_cors_preflight_and_401_carry_cors_headers() -> None:
