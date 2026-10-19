@@ -57,7 +57,7 @@ Indexes on the bookkeeping tables: `query_samples (fingerprint_id, sampled_at DE
 7. `explain_plans.fingerprint_id` is the PK (one plan per fingerprint).
 
 **Success (integration — Testcontainers Postgres, marked `@pytest.mark.integration`):**
-8. `alembic upgrade head` against an empty db creates every table, ends on revision `0001`.
+8. `alembic upgrade head` against an empty db creates every table and ends at head (`0002` since [spec 13](13-migrations-on-deploy.md); `0001` is never edited again).
 9. `alembic downgrade base` drops every table + the `order_status` enum. No orphan types left behind.
 10. `alembic revision --autogenerate` against an already-upgraded db produces an empty diff (proof `target_metadata` matches reality).
 11. Inserting a row into `orders` with an invalid status (`'expired'`) raises a `DataError`.

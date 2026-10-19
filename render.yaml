@@ -4,7 +4,8 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /health
-    preDeployCommand: alembic upgrade head
+    # No preDeployCommand: the free plan never runs one. docker-entrypoint.sh
+    # migrates DATABASE_URL, DATABASE_URL_FAST and SLOWQUERY_STORE_URL at boot.
     envVars:
       - key: DATABASE_URL
         sync: false

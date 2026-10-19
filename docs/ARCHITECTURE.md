@@ -107,7 +107,7 @@ flowchart LR
 
 ## Database schema
 
-All 8 tables live in a single Neon branch, created by one hand-written Alembic migration (`0001_initial.py`).
+All 8 tables live on each Neon branch, created by the hand-written Alembic migration `0001_initial.py`; `0002_dedupe_suggestions.py` guarantees the suggestions unique constraint on branches migrated before `0001` was (wrongly) edited.
 
 ```mermaid
 erDiagram
@@ -250,6 +250,6 @@ The patched hook also owns the self-instrumentation filter (`should_ignore_state
 
 Alembic async env reads `DATABASE_URL` via `slowquery_demo.core.db_config.get_database_url()` which runs the URL through `normalise_asyncpg_url()` so libpq-style `sslmode` / `channel_binding` params don't break asyncpg.
 
-One migration: [`alembic/versions/0001_initial.py`](../alembic/versions/0001_initial.py) -- hand-written DDL for all 8 tables + the `order_status` enum. The no-index guard test ([`tests/unit/test_00_schema.py::test_migration_does_not_create_forbidden_indexes`](../tests/unit/test_00_schema.py)) greps this file and fails the build if any future change adds an index on the three demo-critical columns.
+Two migrations: [`alembic/versions/0001_initial.py`](../alembic/versions/0001_initial.py) -- hand-written DDL for all 8 tables + the `order_status` enum -- and [`0002_dedupe_suggestions.py`](../alembic/versions/0002_dedupe_suggestions.py), which deletes duplicate suggestions and adds `uq_suggestions_fp_kind_sql` where it is missing ([spec 13](specs/13-migrations-on-deploy.md)). `0001` is pinned by hash: an applied migration is never edited. The no-index guard test ([`tests/unit/test_00_schema.py::test_migration_does_not_create_forbidden_indexes`](../tests/unit/test_00_schema.py)) greps every revision and fails the build if any change adds an index on the three demo-critical columns.
 
-On Render Free tier, `render.yaml`'s `preDeployCommand: alembic upgrade head` is [silently ignored](RENDER_FREE_TIER_MIGRATIONS.md), so the first migration ran manually from a dev machine. Subsequent migrations will move into the Dockerfile `CMD` when schema churn picks up.
+Render's free plan [ignores `preDeployCommand`](RENDER_FREE_TIER_MIGRATIONS.md), so the container migrates itself: [`docker-entrypoint.sh`](../docker-entrypoint.sh) runs [`scripts/migrate_all.py`](../scripts/migrate_all.py), which applies `alembic upgrade head` to `DATABASE_URL`, `DATABASE_URL_FAST` and (if it names another database) `SLOWQUERY_STORE_URL` before uvicorn starts. A failed migration stops the boot.

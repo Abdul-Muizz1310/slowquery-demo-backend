@@ -1,8 +1,16 @@
 # Running alembic migrations on Render Free
 
+> **Status (2026-10-20): resolved by Option B1, extended to both branches.** The container's
+> [`docker-entrypoint.sh`](../docker-entrypoint.sh) runs [`scripts/migrate_all.py`](../scripts/migrate_all.py)
+> (`alembic upgrade head` against `DATABASE_URL`, `DATABASE_URL_FAST` and a distinct `SLOWQUERY_STORE_URL`)
+> before uvicorn, and `render.yaml` no longer declares `preDeployCommand`. The manual workaround below is
+> what preceded it; it is also how the live branches missed the suggestions constraint that was later
+> added to an already-applied `0001` (fixed by `0002`, see [spec 13](specs/13-migrations-on-deploy.md)).
+> The rest of this page is the original analysis.
+
 ## The problem
 
-`render.yaml` in this repo declares:
+`render.yaml` in this repo used to declare:
 
 ```yaml
 services:
@@ -28,7 +36,7 @@ HTTP 500 Internal Server Error
 while `GET /health`, `GET /version`, and `GET /_slowquery/queries` all
 return 200 because none of them hit the database.
 
-## Current workaround (as of 2026-04-12)
+## Former workaround (2026-04-12 to 2026-10-20)
 
 One-time manual migration from a dev machine, executed against the
 live Neon branches:
@@ -148,8 +156,8 @@ Until then, the manual step is the least-moving-parts option.
 
 ## Related
 
-- [`render.yaml`](../render.yaml) — currently declares a
-  `preDeployCommand` that is silently ignored on Free.
+- [`render.yaml`](../render.yaml) — no `preDeployCommand` any more; the
+  entrypoint migrates.
 - [`src/slowquery_demo/core/db_config.py`](../src/slowquery_demo/core/db_config.py) — holds `normalise_asyncpg_url` so the raw Neon URL works.
 - [`alembic/env.py`](../alembic/env.py) — async env wired to
   `slowquery_demo.models.Base.metadata`.

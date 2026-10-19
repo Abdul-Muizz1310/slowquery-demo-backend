@@ -130,21 +130,28 @@ def test_database_url_helper_rejects_missing_env(monkeypatch) -> None:  # type: 
 
 
 def test_migration_does_not_create_forbidden_indexes() -> None:
-    """Spec 00 test 16: guard against a refactor silently fixing the slow path."""
-    migration_path = (
-        Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0001_initial.py"
-    )
-    assert migration_path.exists(), "0001_initial.py must be committed in S4"
-    body = migration_path.read_text(encoding="utf-8")
+    """Spec 00 test 16 (+ spec 13 test 6): no migration silently fixes the slow path."""
+    versions = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+    assert (versions / "0001_initial.py").exists(), "0001_initial.py must be committed in S4"
+    migrations = sorted(versions.glob("*.py"))
+    assert len(migrations) >= 2, "the guard must cover every revision, not only 0001"
 
     forbidden = [
         (r"orders", r"user_id"),
         (r"order_items", r"order_id"),
         (r"order_items", r"product_id"),
     ]
-    for table, col in forbidden:
-        pattern = re.compile(rf"create_index\([^)]*{table}[^)]*{col}", re.IGNORECASE | re.DOTALL)
-        assert not pattern.search(body), (
-            f"migration 0001 creates an index on {table}.{col} — "
-            "the slow-path demo depends on its absence"
-        )
+    for migration_path in migrations:
+        body = migration_path.read_text(encoding="utf-8")
+        for table, col in forbidden:
+            pattern = re.compile(
+                rf"create_index\([^)]*{table}[^)]*{col}", re.IGNORECASE | re.DOTALL
+            )
+            assert not pattern.search(body), (
+                f"{migration_path.name} creates an index on {table}.{col} — "
+                "the slow-path demo depends on its absence"
+            )
+            raw = re.compile(rf"CREATE\s+INDEX[^;]*ON\s+{table}\s*\([^)]*{col}", re.IGNORECASE)
+            assert not raw.search(body), (
+                f"{migration_path.name} creates an index on {table}.{col} in raw SQL"
+            )
