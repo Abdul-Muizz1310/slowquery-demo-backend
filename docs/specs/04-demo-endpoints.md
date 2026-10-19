@@ -48,7 +48,7 @@ Four router files under `src/slowquery_demo/api/routers/`, one per commerce mode
 **Failure / negative:**
 11. `GET /users/{id}` with a malformed UUID returns 422 (FastAPI validation) not 500.
 12. `GET /orders/{id}` for a non-existent id returns 404 with the typed error body.
-13. `GET /users?limit=10000` is capped at `MAX_PAGE_SIZE=100` and returns 100 rows.
+13. `GET /users?limit=10000` is rejected with 422 at the API edge (`limit` is `Query(ge=1, le=100)` since the public-URL hardening in `ea8ddd6`; it used to be clamped silently); `GET /users?limit=100` returns 100 rows (`MAX_PAGE_SIZE`).
 14. A service call that hits a dropped database (pool dead) returns 503, not 500, and logs at `error` severity with the request id in structlog context.
 
 **Security / destructive-guard:**

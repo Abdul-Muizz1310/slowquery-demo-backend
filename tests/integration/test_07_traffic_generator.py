@@ -7,7 +7,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-async def test_run_produces_every_task_type(live_demo, pg_engine) -> None:  # type: ignore[no-untyped-def]
+async def test_run_produces_every_task_type(live_demo) -> None:  # type: ignore[no-untyped-def]
     """Spec 07 test 4."""
     import asyncio
     import subprocess
@@ -45,22 +45,22 @@ async def test_run_produces_every_task_type(live_demo, pg_engine) -> None:  # ty
     assert stats["total"] >= 1, f"expected at least 1 request, got {stats}"
 
 
-async def test_run_populates_fingerprints(live_demo, pg_engine) -> None:  # type: ignore[no-untyped-def]
+async def test_run_populates_fingerprints(live_demo, pg_engine_noop) -> None:  # type: ignore[no-untyped-def]
     """Spec 07 test 5."""
     from sqlalchemy import text
 
     await _run_generator(live_demo.base_url, duration=10)
-    async with pg_engine.connect() as conn:
+    async with pg_engine_noop.connect() as conn:
         count = await conn.scalar(text("SELECT COUNT(DISTINCT id) FROM query_fingerprints"))
     assert count >= 5
 
 
-async def test_n_plus_one_burst_produces_dense_samples(live_demo, pg_engine) -> None:  # type: ignore[no-untyped-def]
+async def test_n_plus_one_burst_produces_dense_samples(live_demo, pg_engine_noop) -> None:  # type: ignore[no-untyped-def]
     """Spec 07 test 6."""
     from sqlalchemy import text
 
     await _run_generator(live_demo.base_url, duration=15)
-    async with pg_engine.connect() as conn:
+    async with pg_engine_noop.connect() as conn:
         burst = await conn.scalar(
             text(
                 "SELECT MAX(c) FROM ("

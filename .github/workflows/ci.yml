@@ -38,12 +38,69 @@ jobs:
       - name: Per-module coverage floors
         run: make floors
 
-  build:
-    needs: test
+  # The Testcontainers lane (DEVIATIONS §7): real Postgres for the slow and the
+  # fast branch, migrations (spec 13), seeds, the composed app. Coverage is the
+  # unit lane's job, so this run does not gate on it.
+  integration:
+    needs: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - run: docker build -t ${{ github.repository }}:${{ github.sha }} .
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.12
+      - run: uv sync --frozen --all-extras
+      - run: uv run pytest -m integration --no-cov
+
+  build:
+    needs: [test, integration]
+    runs-on: ubuntu-latest
+    # Two empty Postgres servers stand in for the slow and fast Neon branches,
+    # so the built image is booted exactly as Render boots it (spec 13).
+    services:
+      pg_slow:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: demo, POSTGRES_PASSWORD: demo, POSTGRES_DB: slowquery }
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U demo" --health-interval 2s
+          --health-timeout 5s --health-retries 30
+      pg_fast:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: demo, POSTGRES_PASSWORD: demo, POSTGRES_DB: slowquery_fast }
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U demo" --health-interval 2s
+          --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t slowquery-demo:ci .
+      - name: Boot the image - entrypoint migrates both branches, then serves
+        run: |
+          docker run -d --name app --network host \
+            -e DATABASE_URL=postgresql://demo:demo@127.0.0.1:5433/slowquery \
+            -e DATABASE_URL_FAST=postgresql://demo:demo@127.0.0.1:5434/slowquery_fast \
+            slowquery-demo:ci
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8000/health && break
+            sleep 2
+          done
+          docker logs app
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"db":"ok"'
+      - name: Both branches are at the image's alembic head
+        run: |
+          head=$(docker run --rm --entrypoint python slowquery-demo:ci -m alembic heads | cut -d' ' -f1)
+          test -n "$head"
+          for target in 5433/slowquery 5434/slowquery_fast; do
+            port=${target%%/*}; db=${target#*/}
+            got=$(PGPASSWORD=demo psql -h 127.0.0.1 -p "$port" -U demo -d "$db" -tAc \
+              "SELECT version_num FROM alembic_version")
+            echo "$db: $got (head $head)"
+            test "$got" = "$head"
+            n=$(PGPASSWORD=demo psql -h 127.0.0.1 -p "$port" -U demo -d "$db" -tAc \
+              "SELECT count(*) FROM pg_constraint WHERE conname = 'uq_suggestions_fp_kind_sql'")
+            test "$n" = "1"
+          done
 
   # NOTE: no deploy job — the Render service auto-deploys main on push. This job
   # verifies the deploy that push triggered actually came up. It is inert unless

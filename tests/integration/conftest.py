@@ -17,9 +17,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -642,9 +643,10 @@ def dual_pg_app(
 class _LiveDemo:
     """Wrapper around a real uvicorn server for traffic generator tests."""
 
-    def __init__(self, base_url: str, process: subprocess.Popen[bytes]) -> None:
+    def __init__(self, base_url: str, process: subprocess.Popen[bytes], log: IO[bytes]) -> None:
         self._base_url = base_url
         self._process = process
+        self._log = log
 
     @property
     def base_url(self) -> str:
@@ -652,7 +654,13 @@ class _LiveDemo:
 
     def stop(self) -> None:
         self._process.terminate()
-        self._process.wait(timeout=10)
+        try:
+            self._process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=10)
+        finally:
+            self._log.close()
 
 
 def _start_uvicorn_server(
@@ -679,6 +687,10 @@ def _start_uvicorn_server(
     if env_extra:
         env.update(env_extra)
 
+    # The server's output goes to a temporary file, never a pipe: a traffic run
+    # writes one access-log line per request, and an undrained 64 KiB pipe
+    # blocks uvicorn mid-write, which then also ignores SIGTERM.
+    log = tempfile.TemporaryFile()  # noqa: SIM115 - lives as long as the server; closed in stop()
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -691,9 +703,12 @@ def _start_uvicorn_server(
             str(port),
         ],
         env=env,
-        cwd=_PROJECT_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        # Not the project root: Settings reads ``.env`` from the working
+        # directory, and a developer's ``.env`` (another SLOWQUERY_STORE_URL,
+        # threshold, …) must not leak into a hermetic test server.
+        cwd=tempfile.gettempdir(),
+        stdout=log,
+        stderr=subprocess.STDOUT,
     )
 
     # Wait for server to be ready (up to 15 seconds).
@@ -705,15 +720,17 @@ def _start_uvicorn_server(
         try:
             r = httpx.get(f"{base_url}/health", timeout=1)
             if r.status_code == 200:
-                return _LiveDemo(base_url, proc)
+                return _LiveDemo(base_url, proc, log)
         except Exception:
             pass
         time.sleep(0.3)
 
     proc.terminate()
     proc.wait(timeout=5)
-    stderr = proc.stderr.read().decode() if proc.stderr else ""
-    raise RuntimeError(f"uvicorn did not start within 15s. stderr: {stderr}")
+    log.seek(0)
+    output = log.read().decode(errors="replace")
+    log.close()
+    raise RuntimeError(f"uvicorn did not start within 15s. output: {output}")
 
 
 @pytest.fixture

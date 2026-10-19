@@ -67,9 +67,10 @@ def test_cursor_roundtrip(seeded_test_client) -> None:  # type: ignore[no-untype
     assert first_ids.isdisjoint(second_ids)
 
 
-def test_limit_clamped_to_max_page_size(seeded_test_client) -> None:  # type: ignore[no-untyped-def]
-    """Spec 04 test 13."""
-    resp = seeded_test_client.get("/users?limit=10000")
+def test_limit_above_max_page_size_is_rejected(seeded_test_client) -> None:  # type: ignore[no-untyped-def]
+    """Spec 04 test 13: the API edge rejects limit > MAX_PAGE_SIZE; 100 itself is served."""
+    assert seeded_test_client.get("/users?limit=10000").status_code == 422
+    resp = seeded_test_client.get("/users?limit=100")
     assert resp.status_code == 200
     assert len(resp.json()["items"]) == 100
 
