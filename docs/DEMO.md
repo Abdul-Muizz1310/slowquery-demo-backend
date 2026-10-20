@@ -49,7 +49,7 @@ curl -s https://slowquery-demo-backend.onrender.com/_slowquery/queries \
 
 21 fingerprints at the time of that snapshot. On a freshly-seeded branch this is `[]` until traffic flows — that's the pipeline waiting for you.
 
-**Read the rows above critically.** Four of those five are the observability system's *own* bookkeeping reads (`select … from query_fingerprints`, `… from suggestions`) and `/health`'s `SELECT 1`, captured before the self-instrumentation ignore list existed. `observability.should_ignore_statement` (spec 05 invariants 5-6) now filters them, so nothing new like that is recorded — but the historical rows persist in `query_fingerprints` until the table is cleared:
+**Read the rows above critically.** Four of those five are the observability system's *own* bookkeeping reads (`select … from query_fingerprints`, `… from suggestions`) and `/health`'s `SELECT 1`, captured before the self-instrumentation ignore list existed. An ignore list filtered them in the 0.1-era pipeline; since spec 15 they cannot be recorded at all (the library's store and `/health` run on engines it does not observe), and the library starts from a clean schema `slowquery`, so these historical rows exist only in the unused 0.1-era `public.query_fingerprints`:
 
 ```sql
 TRUNCATE query_fingerprints CASCADE;  -- cascades to samples / plans / suggestions
@@ -113,7 +113,7 @@ psql "$NEON_DB_URL_SLOWQUERY" -c "
 #           21 |     837 |    20 |           5
 ```
 
-Every row in those four tables came from a real endpoint call flowing through the slowquery-detective middleware → [shim 4 bridge queue](../src/slowquery_demo/core/observability.py) → async drainer → direct EXPLAIN → rules engine → store writer. (`query_samples` is pruned to `SLOWQUERY_SAMPLE_RETENTION_S`, 1 day by default, so `samples` reflects roughly the last day of traffic rather than all time.)
+*(Updated for spec 15.)* The service now runs slowquery-detective 0.2: every row comes from a real endpoint call flowing through the library's hooks → its recorder and 2-second flush → its EXPLAIN worker (real parameters, no `ANALYZE`) → rules → its store in schema `slowquery`. The `public` bookkeeping tables shown above are the 0.1-era ones; they are no longer written. Samples and request aggregates are kept for the library's `retention_s` (7 days).
 
 ### 6. Inspect what the rules engine produced
 
@@ -153,7 +153,7 @@ Three most expensive captured plans by `cost` at the time of this snapshot: `63b
 Three things the spec promised that this repo's `v0.1.0` doesn't deliver. Each has a documented rationale and close path in [DEVIATIONS.md](DEVIATIONS.md):
 
 1. **`seq_scan_large_table` and `n_plus_one` rules don't fire in the current configuration** ([DEVIATIONS.md §2](DEVIATIONS.md#2-rules-engine-1-of-3-rules-firing-on-live-traffic)).
-2. **`POST /branches/switch` rebuilds the commerce engine, clears the buffer, and re-attaches the in-process listeners — but the drainer's EXPLAIN pool does not yet repoint at the new branch** ([DEVIATIONS.md §3](DEVIATIONS.md#3-post-branchesswitch-rebuilds-the-commerce-engine-but-the-observability-explain-pool-does-not-follow-the-swap)).
+2. ~~The branch switch's EXPLAIN did not follow the new branch~~ — closed by spec 15: the switch repoints the engine slowquery-detective observes and explains on ([DEVIATIONS.md §3](DEVIATIONS.md)).
 3. **LLM fallback is off by default** ([DEVIATIONS.md §5](DEVIATIONS.md#5-llm-fallback-llm_fallback_enabled-is-off-in-production)).
 
 ## What the dashboard frontend consumes

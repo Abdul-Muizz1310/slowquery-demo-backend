@@ -95,7 +95,8 @@ Two pieces ship:
 **Integration (Testcontainers Postgres + a live local uvicorn):**
 4. A 10-second run produces at least one request of each task type.
 5. After a run, `GET /_slowquery/queries` lists at least five fingerprints.
-6. The N+1 burst puts at least five samples of one fingerprint into one clock second.
+6. The N+1 burst shows as one hot fingerprint: the user-orders statement reaches a call count of at least
+   50 in a 15-second run (slowquery-detective 0.2 keeps per-fingerprint aggregates, spec 15).
 7. The driver runs unchanged against a service with `DEMO_MODE=false`.
 
 **Unit (schedule — the workflow file, parsed as YAML):**

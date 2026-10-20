@@ -8,12 +8,12 @@ services/       →   business logic (pure; raises typed DomainError subclasses)
 repositories/   →   async SQLAlchemy select()/text() — the ONLY layer that imports SQLAlchemy
 models/         →   SQLAlchemy 2.0 DeclarativeBase ORM classes
 schemas/        →   Pydantic v2 DTOs + PaginatedResponse[T]
-core/           →   config (Settings), database (engine + session factory),
-                     db_config (asyncpg URL normalisation), branch_state
-                     (.branch_state persistence), access (mutation cooldown +
-                     admin-token gates), errors (DomainError + exception
-                     handlers), observability (the four library shims, the
-                     self-instrumentation ignore list, and the drainer),
+core/           →   config (Settings), database (BranchTarget + the commerce
+                     and health engines), db_config (asyncpg URL
+                     normalisation), branch_state (.branch_state persistence),
+                     access (mutation cooldown + admin-token gates), errors
+                     (DomainError + exception handlers), observability
+                     (slowquery-detective 0.2 install + authorize hook),
                      platform (health, version, metrics, CORS), platform_auth /
                      platform_token / platform_keys / public_routes (contract v2)
 ```
@@ -25,62 +25,30 @@ Controllers never touch the DB. Models never know about HTTP. Pure core, imperat
 ```mermaid
 flowchart TD
     Client["curl / dashboard / traffic_generator"]
+    Tagger["slowquery-detective request tagger<br/>X-Request-Id → context"]
     Router["api/routers/users.py<br/>list_user_orders"]
     Service["services/order_service.py<br/>list_user_orders"]
     Repo["repositories/order_repository.py<br/>list_for_user"]
     Session["AsyncSession via get_db dependency"]
-    Engine["AsyncEngine<br/>build_engine + normalise_asyncpg_url"]
-    Hook["SQLAlchemy event<br/>before/after_cursor_execute"]
-    Neon1[("Neon slowquery branch<br/>seeded commerce schema")]
+    Engine["commerce AsyncEngine<br/>async_creator → BranchTarget.url"]
+    Hook["library hooks<br/>before/after_cursor_execute"]
+    Neon1[("Neon slow or fast branch<br/>seeded commerce schema")]
 
-    Bridge["Shim 4 bridge queue<br/>asyncio.Queue(maxsize=10_000)"]
-    Drainer["core/observability.py<br/>_drainer task"]
-    StoreWriter["services/store.py<br/>PostgresStoreWriter"]
-    DirectExplain["_run_direct_explain<br/>real statement + params"]
-    Rules["slowquery_detective.rules.run_rules"]
-    Neon2[("Neon slowquery branch<br/>query_fingerprints / samples /<br/>explain_plans / suggestions")]
+    Runtime["library runtime<br/>recorder · 2 s flush · EXPLAIN worker"]
+    Store["library PostgresStoreWriter<br/>own engine, never observed"]
+    Neon2[("store database (slow branch)<br/>schema slowquery")]
 
-    Client --> Router
-    Router --> Service
-    Service --> Repo
-    Repo --> Session
-    Session --> Engine
-    Engine --> Hook
+    Client --> Tagger --> Router --> Service --> Repo --> Session --> Engine
     Engine --> Neon1
-    Hook -. "loop.call_soon_threadsafe" .-> Bridge
-    Bridge --> Drainer
-    Drainer --> StoreWriter
-    Drainer --> DirectExplain
-    DirectExplain --> Rules
-    Rules --> StoreWriter
-    StoreWriter --> Neon2
+    Engine --> Hook
+    Hook --> Runtime
+    Runtime -- "EXPLAIN, real params, no ANALYZE" --> Engine
+    Runtime --> Store --> Neon2
 ```
 
-The dashed arrow from `Hook` to `Bridge` is the only cross-loop boundary: SQLAlchemy events fire in sync context (even for async engines), and we dispatch to the FastAPI event loop via `loop.call_soon_threadsafe`. Everything downstream of the bridge is pure async on the main loop.
-
-## Shim architecture
-
-The demo backend bridges the `slowquery-detective` library to a real async engine via four compatibility shims in `core/observability.py`. This is the key technical achievement of this repo -- the library was designed for sync engines, and these shims make it work transparently with asyncpg.
-
-```mermaid
-flowchart TD
-    Library["slowquery-detective library<br/>(designed for sync engines)"]
-
-    S1["Shim 1: add_event_handler<br/>no-op (Starlette 1.0 removed it)"]
-    S2["Shim 2: StoreWriter swap<br/>setattr at import time →<br/>PostgresStoreWriter"]
-    S3["Shim 3: cursor.info → setattr<br/>async cursors lack .info dict;<br/>use setattr(context, _KEY, ...)"]
-    S4["Shim 4: sync→async bridge<br/>+ direct EXPLAIN<br/>Queue + call_soon_threadsafe<br/>skips broken synthesize_params"]
-
-    Library --> S1
-    Library --> S2
-    Library --> S3
-    Library --> S4
-
-    S4 --> Queue["asyncio.Queue(10_000)"]
-    Queue --> Drainer["_drainer coroutine<br/>on main event loop"]
-    Drainer --> RealExplain["Direct EXPLAIN with<br/>captured real params<br/>(not synthesized)"]
-    Drainer --> Store["PostgresStoreWriter<br/>→ Neon Postgres"]
-```
+Everything right of the hooks is slowquery-detective 0.2 ([spec 15](specs/15-slowquery-detective-0-2.md)); the demo
+calls only `install(...)`. The hooks are attached to the commerce engine only: the library's store and the
+`/health` probe use their own engines, so the observability pipeline never observes itself.
 
 ## Two-branch demo
 
@@ -182,7 +150,7 @@ erDiagram
     query_fingerprints ||--o{ suggestions : "produces"
 ```
 
-The first four tables are the commerce domain (seeded with fake data). The last four are the `slowquery-detective` bookkeeping tables, written by `PostgresStoreWriter`; the bookkeeping columns above are the ones [`models/slowquery_store.py`](../src/slowquery_demo/models/slowquery_store.py) declares and [`schemas/slowquery.py`](../src/slowquery_demo/schemas/slowquery.py) serialises — the diagram is diffable against the models, not a sketch.
+The first four tables are the commerce domain (seeded with fake data). The last four are the 0.1-era bookkeeping tables in schema `public` ([`models/slowquery_store.py`](../src/slowquery_demo/models/slowquery_store.py)): migrations `0001`/`0002` still own them, but since spec 15 nothing writes them. slowquery-detective 0.2 keeps its data in its own schema `slowquery` (`query_fingerprints`, `request_stats`, `query_samples`, `explain_plans`, `suggestions`, `schema_version`), created at startup on the store database.
 
 ### Deliberate source-text guard tests
 
@@ -211,7 +179,7 @@ flowchart LR
     Switch -- "rebuild engine + swap on app.state" --> Fast
 ```
 
-The branch-switch code path rebuilds the SQLAlchemy engine at runtime: it builds a new `AsyncEngine` against the target URL, health-checks it with `SELECT 1`, atomically swaps `app.state.engine` + `app.state.db_sessionmaker`, clears the rolling buffer, and re-attaches the slowquery listeners to the new engine. The one remaining gap is that the drainer's EXPLAIN pool does not yet repoint at the new branch -- see [DEVIATIONS.md §3](DEVIATIONS.md).
+The branch-switch code path repoints the one commerce engine at runtime (spec 15): it health-checks the target URL with `SELECT 1`, sets `BranchTarget.url`, disposes the commerce and health pools and clears the library's rolling percentiles. The engine object never changes, so slowquery-detective's hooks and EXPLAIN worker follow the switch (DEVIATIONS §3, closed).
 
 ## Key endpoints
 
@@ -231,20 +199,15 @@ The branch-switch code path rebuilds the SQLAlchemy engine at runtime: it builds
 | `/branches/switch` | Swap the active branch: rebuilds + swaps the `AsyncEngine`, clears the buffer, re-attaches the hooks (cooldown-throttled) | -- |
 | `/branches/current` | Read the active branch (read-only, ungated) | -- |
 
-The `/branches/switch` row used to read "full engine rebuild deferred". That is stale: the rebuild ships (see the paragraph above and [DEVIATIONS §3](DEVIATIONS.md)). The one part still deferred is repointing the drainer's EXPLAIN pool at the new branch.
+The `/branches/switch` row used to read "full engine rebuild deferred", and later "EXPLAIN pool does not follow". Both are closed: the switch repoints the engine the library observes and explains on.
 
-Queries the observability pipeline issues against its own bookkeeping tables, plus `/health`'s `SELECT 1`, are filtered out of capture by `observability.should_ignore_statement` (spec 05 invariants 5-6) — otherwise the dashboard's own reads accumulate `total_ms` and climb to the top of `/_slowquery/queries`, burying the commerce slow queries the demo exists to show.
+The observability pipeline never observes its own reads: the library's store runs on its own engine and `/health`'s `SELECT 1` on the uninstrumented health engine, so neither can climb to the top of `/_slowquery/queries` and bury the commerce slow queries the demo exists to show.
 
-## The four library compatibility shims
+## The four library compatibility shims (retired)
 
-See [`core/observability.py`](../src/slowquery_demo/core/observability.py) for the implementation; each shim is documented inline. Summary:
-
-1. `add_event_handler` -> no-op (Starlette 1.0 removed it).
-2. `StoreWriter` swapped at import time via `setattr(_sqd_middleware, "StoreWriter", PostgresStoreWriter)`.
-3. `cursor.info[_KEY]` -> `setattr(context, _KEY, ...)` in the hook (async cursors and asyncpg contexts both lack `.info`).
-4. Sync-hook to async-store bridge + direct EXPLAIN using real captured statement + parameters, skipping the library's broken `synthesize_params`.
-
-The patched hook also owns the self-instrumentation filter (`should_ignore_statement`): the library's `install()` has no ignore-list parameter, so spec 05 invariants 5-6 are enforced here, in the `after_cursor_execute` listener, before either recording sink.
+0.1.0 needed four monkey-patches here (lifespan wiring, an injectable store, execution-context timing, a
+sync-hook-to-async bridge with real-parameter EXPLAIN). slowquery-detective 0.2.0 upstreamed all four and
+the demo now uses its public API only (DEVIATIONS §8, closed; [spec 15](specs/15-slowquery-detective-0-2.md)).
 
 ## Migration path
 

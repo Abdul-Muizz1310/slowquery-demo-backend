@@ -99,7 +99,7 @@ def test_client(empty_session: AsyncMock) -> Iterator[TestClient]:
     # integration-lane (spec 10).
     switcher = getattr(app.state, "branch_switcher", None)
     if switcher is not None:
-        switcher._engine_builder = None  # type: ignore[attr-defined]
+        switcher._retarget = None  # type: ignore[attr-defined]
 
     async def _override() -> AsyncGenerator[AsyncMock, None]:
         yield empty_session

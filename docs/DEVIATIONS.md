@@ -22,19 +22,13 @@ Complete list of gaps between what the authoritative spec describes and what act
 
 **To close:** scale the seed (fixes 1); rewrite the N+1 burst task to use `asyncio.gather` across 50 concurrent requests, or add a `/debug/n-plus-one-burst` endpoint on the service itself that issues all 50 queries in one handler call.
 
-## 3. `POST /branches/switch` rebuilds the commerce engine, but the observability EXPLAIN pool does not follow the swap
+## 3. EXPLAIN did not follow a branch switch (closed 2026-10-20, spec 15)
 
-**Spec says:** "Branch switch toggles between slow and fast demos … uses Neon API to swap between the two branches".
+**Spec says:** "Branch switch toggles between slow and fast demos".
 
-**Repo ships (current):** the endpoint validates `target ∈ {slow, fast}` with a `Literal` type, serialises concurrent switches via `asyncio.Lock`, persists `app.state.branch_current` to a `.branch_state` file so restarts respect the choice, and returns a `SwitchBranchResponse` with `active`, `switched_at`, and `latency_ms`. It **does** rebuild the SQLAlchemy `AsyncEngine` / `async_sessionmaker` against the target branch's URL: `main._make_engine_builder` builds a new engine, health-checks it with `SELECT 1` (5s timeout), atomically swaps `app.state.engine` + `app.state.db_sessionmaker`, and disposes the old engine after a 5s grace window. `core/database.get_db` reads `app.state.db_sessionmaker` per request, so commerce queries (`/users`, `/orders`, `/users/{id}/orders`) follow the switch. After a successful swap the switcher's `post_switch` hook (`main._make_post_switch` → `observability.on_branch_switch`) also **clears `app.state.slowquery_buffer`** (spec 06 invariant 5) and **re-attaches the slowquery listeners to the new engine** (`observability.reattach_slowquery`), so the rolling percentiles reset and new in-process samples start recording against the new branch within one request.
+**Used to ship:** `POST /branches/switch` rebuilt the commerce `AsyncEngine` and re-attached the hooks to it, but the drainer's direct `EXPLAIN` ran through the bookkeeping store's pool (the slow branch), so after a switch to `fast` the captured plans and suggestions still described the slow branch.
 
-This closes the *old* version of this deviation — the engine rebuild, buffer clear, and listener re-attach all ship now and are unit-tested (`tests/unit/test_06_branches_switch.py`, `tests/unit/test_10_engine_rebuild.py`, `tests/unit/test_05_slowquery_install.py`).
-
-**Remaining gap:** the drainer's direct-EXPLAIN path is **not** repointed at the new branch. `core/observability._run_direct_explain` runs `EXPLAIN (FORMAT JSON)` through `store._ensure_pool()` — the same asyncpg pool the `PostgresStoreWriter` uses for the bookkeeping tables, keyed on `SLOWQUERY_STORE_URL` (default `DATABASE_URL`). Per spec 06 invariant 6 the bookkeeping store is *deliberately* independent of the switch, but EXPLAIN piggybacks on that pool, so after switching to `fast` the captured plans are still produced against the slow branch's schema. The persisted percentiles (from the in-process listeners, which do follow the swap) are correct for the new branch; the persisted EXPLAIN plan / cost / rule-suggestions for a fingerprint can lag one branch behind until the store pool is separated from the EXPLAIN pool.
-
-**Why the EXPLAIN repoint is deferred:** splitting the EXPLAIN pool from the bookkeeping store pool means giving the drainer its own pool keyed on the *active commerce* URL and rebuilding/repointing it on every switch, inside the drainer's critical section. That change cannot be verified without two live branches (Testcontainers / Neon), and shipping it untested risks a half-broken EXPLAIN path that fails silently. It is left as a contained follow-up rather than guessed at.
-
-**To close:** give the drainer a dedicated asyncpg pool built from `app.state.engine`'s active URL (not the store URL), repoint it inside `on_branch_switch`, and verify with the integration lane (spec 06 test 8/9 already EXPLAIN before and after a switch against two Testcontainers Postgres instances).
+**Repo ships (now):** slowquery-detective 0.2 binds its hooks and its `EXPLAIN` worker to the engine handed to `install` for the app's lifetime, so the switch no longer replaces that engine. One commerce engine connects through an `async_creator` that dials `BranchTarget.url`; a switch health-checks the target (`SELECT 1`, 5 s), sets the URL and disposes the pools. Queries, the library's hooks and its `EXPLAIN` all follow the switch. The library's ring buffer is cleared after it (spec 06 invariant 5). Persisted fingerprints, plans and suggestions live in the library's store on the slow branch (`SLOWQUERY_STORE_URL`, else `DATABASE_URL`), independent of the switch, which is what the dashboard reads. Verified in the integration lane against two Postgres containers.
 
 ## 4. `SLOWQUERY_THRESHOLD_MS` default is too high for the current data size
 
@@ -74,16 +68,11 @@ This closes the *old* version of this deviation — the engine rebuild, buffer c
 
 **Repo ships (now):** [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) has an `integration` job that runs `uv run pytest -m integration` on the GitHub runner's Docker, so every push and pull request runs the Testcontainers lane (two `postgres:16-alpine` containers: the slow and the fast branch). The unit lane and its coverage floors are unchanged.
 
-## 8. Four live production bugs fixed by in-repo shims rather than upstream PRs
+## 8. Four library bugs fixed by in-repo shims rather than upstream (closed 2026-10-20, spec 15)
 
-**Reality:** [`core/observability.py`](../src/slowquery_demo/core/observability.py) contains four module-level monkey-patches that rewrite slowquery-detective v0.1.0's behaviour. Each is documented inline with a rationale. The right long-term fix is to upstream these to the library itself:
+**Used to ship:** `core/observability.py` carried four monkey-patches over slowquery-detective 0.1.0 (lifespan instead of `add_event_handler`, an injectable store, timing state on the `ExecutionContext` instead of `cursor.info`, a sync-hook-to-async-store bridge with `EXPLAIN` on real parameters), plus the demo's own `PostgresStoreWriter`, bookkeeping repository and read routes. The dependency was pinned to `==0.1.0` because any release could break the patches.
 
-1. Replace `app.add_event_handler` with FastAPI lifespan.
-2. Accept an optional `store: StoreWriter | None` parameter on `install()`.
-3. Rewrite `hooks.attach` to stash state via `setattr(context)` rather than `cursor.info`.
-4. Rewrite `ExplainWorker._run_explain` to accept real captured parameters or integrate the bridge queue pattern from shim 4.
-
-**To close:** open PRs against the `slowquery-detective` repo. Until then, the shims stay in this repo's `core/observability.py` and are versioned alongside the library they patch.
+**Repo ships (now):** slowquery-detective 0.2.0 upstreamed all four (its `docs/specs/07-fleet-observability.md`). The demo depends on `slowquery-detective[fastapi,postgres]>=0.2,<0.3` and calls only `install(app, engine, service="slowquery", store_url=…, authorize=…, mount_path="/_slowquery")`; the shims, the store writer, the repository and the 0.1-era read routes are deleted. The library owns `GET /_slowquery/queries` (with `?request_id=` for bastion's measure stage) and `GET /_slowquery/queries/{id}`; the demo keeps its SSE stream and force-explain on top of the library's store. Data starts clean in schema `slowquery`; the old `public` bookkeeping tables stay, unused (spec 15 explains why).
 
 ## 9. State-mutating endpoints are hardened for the public URL
 

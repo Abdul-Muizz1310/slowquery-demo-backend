@@ -4,10 +4,8 @@
 #   - github-actions: the pinned action versions in .github/workflows/
 #   - uv:             the uv.lock / pyproject.toml dependency set
 #
-# NOTE: slowquery-detective is pinned exactly (==0.1.0) in pyproject.toml because
-# core/observability.py monkeypatches its v0.1.0 internals. It is ignored here so
-# Dependabot cannot silently break the four compatibility shims; upgrades to that
-# library have to be done by hand alongside the shims.
+# slowquery-detective is used through its public 0.2 API only (the shims that
+# monkeypatched 0.1 are gone), so Dependabot may raise it within >=0.2,<0.3.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -25,5 +23,3 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    ignore:
-      - dependency-name: "slowquery-detective"

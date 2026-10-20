@@ -175,32 +175,26 @@ async def test_live_shaped_database_is_deduplicated_and_constrained(
     assert await _version(empty_db) == "0002"
 
 
-async def test_store_writer_conflict_insert_works_after_0002(
-    empty_db: AsyncEngine, slow_url: str
-) -> None:
-    """Spec 13 test 16: the store's ON CONFLICT insert stops failing."""
-    from slowquery_detective.rules.base import Suggestion
-    from sqlalchemy.exc import IntegrityError
+async def test_conflict_insert_works_after_0002(empty_db: AsyncEngine, slow_url: str) -> None:
+    """Spec 13 test 16: the 0.1 store writer's ON CONFLICT insert stops failing.
 
-    from slowquery_demo.services.store import PostgresStoreWriter
+    Since spec 15 the demo writes through slowquery-detective's own schema;
+    the statement the 0.1-era writer ran is replayed here as SQL.
+    """
+    from sqlalchemy.exc import IntegrityError
 
     await _make_live_shaped(empty_db, slow_url)
     _alembic(slow_url, "upgrade", "head")
     before = len(await _suggestion_rows(empty_db))
 
-    writer = PostgresStoreWriter(slow_url)
-    try:
-        again = Suggestion(
-            kind="index",
-            sql="CREATE INDEX ix ON orders(created_at);",
-            rationale="r",
-            confidence=0.9,
-            source="rules",
-        )
-        await writer.insert_suggestions("aaaaaaaaaaaaaaaa", [again])
-        await writer.insert_suggestions("aaaaaaaaaaaaaaaa", [again])
-    finally:
-        await writer.close()
+    conflict_insert = text(
+        "INSERT INTO suggestions (fingerprint_id, kind, sql, source, rationale) "
+        "VALUES ('aaaaaaaaaaaaaaaa', 'index', 'CREATE INDEX ix ON orders(created_at);', "
+        "'rules', 'r') ON CONFLICT (fingerprint_id, kind, sql) DO NOTHING"
+    )
+    for _ in range(2):
+        async with empty_db.begin() as conn:
+            await conn.execute(conflict_insert)
     assert len(await _suggestion_rows(empty_db)) == before
 
     with pytest.raises(IntegrityError):

@@ -11,6 +11,11 @@ The imperative shell around :mod:`slowquery_demo.core.platform_token`:
    a WARNING naming the check (never the token), even under ``DEMO_MODE``;
 5. otherwise the principal goes on ``request.state.platform_principal``.
 
+Every request admitted under rules 3 and 5 gets
+``request.state.platform_admitted = True``; slowquery-detective's
+``authorize`` hook reads exactly that (spec 15), so the library's routes
+follow the same contract as every other protected route.
+
 The token is read from ``X-Platform-Token``, else ``Authorization: Bearer``.
 """
 
@@ -77,6 +82,7 @@ def install_platform_auth(app: FastAPI, *, settings: Settings) -> None:
                     request.method,
                     request.url.path,
                 )
+                request.state.platform_admitted = True
                 return await call_next(request)
             return _deny(401, "missing_platform_token")
 
@@ -92,4 +98,5 @@ def install_platform_auth(app: FastAPI, *, settings: Settings) -> None:
             return _deny(401, "invalid_platform_token")
 
         request.state.platform_principal = principal
+        request.state.platform_admitted = True
         return await call_next(request)

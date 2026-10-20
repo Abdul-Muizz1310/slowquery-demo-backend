@@ -1,5 +1,10 @@
 # Spec 05 — Installing `slowquery-detective`
 
+> **Superseded by [spec 15](15-slowquery-detective-0-2.md) (2026-10-20).** The four shims this spec
+> describes were upstreamed into slowquery-detective 0.2 and deleted here; the self-instrumentation
+> guarantee is now structural (the store and the `/health` probe run on engines the library never observes).
+> Kept as the record of the 0.1-era wiring.
+
 ## Goal
 
 Wire `slowquery-detective` v0.1.0 into the demo service as a 3-line integration (plus a fourth line for the dashboard router mount) — matching the library's documented public API. Configuration comes from environment variables, the store is the `PostgresStoreWriter` from Spec 01, and the LLM fallback is OpenRouter-backed (the library's `LlmConfig`). This is the smallest amount of code that turns the demo service into a live slowquery observability surface.

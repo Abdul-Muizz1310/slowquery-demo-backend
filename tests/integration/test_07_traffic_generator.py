@@ -45,34 +45,39 @@ async def test_run_produces_every_task_type(live_demo) -> None:  # type: ignore[
     assert stats["total"] >= 1, f"expected at least 1 request, got {stats}"
 
 
-async def test_run_populates_fingerprints(live_demo, pg_engine_noop) -> None:  # type: ignore[no-untyped-def]
-    """Spec 07 test 5."""
-    from sqlalchemy import text
+async def _fingerprints(base_url: str) -> list[dict[str, object]]:
+    """The live server's fingerprints, read through the library route (it flushes first)."""
+    import httpx
 
+    async with httpx.AsyncClient(base_url=base_url, timeout=30) as client:
+        resp = await client.get("/_slowquery/queries", params={"limit": 500})
+    resp.raise_for_status()
+    rows: list[dict[str, object]] = resp.json()
+    return rows
+
+
+async def test_run_populates_fingerprints(live_demo) -> None:  # type: ignore[no-untyped-def]
+    """Spec 07 test 5: slowquery-detective's store holds the traffic's fingerprints."""
     await _run_generator(live_demo.base_url, duration=10)
-    async with pg_engine_noop.connect() as conn:
-        count = await conn.scalar(text("SELECT COUNT(DISTINCT id) FROM query_fingerprints"))
-    assert count >= 5
+    assert len(await _fingerprints(live_demo.base_url)) >= 5
 
 
-async def test_n_plus_one_burst_produces_dense_samples(live_demo, pg_engine_noop) -> None:  # type: ignore[no-untyped-def]
-    """Spec 07 test 6."""
-    from sqlalchemy import text
+async def test_n_plus_one_burst_produces_dense_samples(live_demo) -> None:  # type: ignore[no-untyped-def]
+    """Spec 07 test 6: the N+1 burst lands as one hot fingerprint.
 
+    slowquery-detective 0.2 keeps per-fingerprint aggregates, not one sample
+    row per call (spec 15), so the burst shows as call_count: the
+    user-orders statement is run at least 50 times (one burst) in the window.
+    """
     await _run_generator(live_demo.base_url, duration=15)
-    async with pg_engine_noop.connect() as conn:
-        burst = await conn.scalar(
-            text(
-                "SELECT MAX(c) FROM ("
-                "  SELECT COUNT(*) c FROM query_samples"
-                "  GROUP BY fingerprint_id, date_trunc('second', sampled_at)"
-                ") x"
-            )
-        )
-    # The n+1 burst loop fires 50 rapid requests, but on slow CI/local
-    # setups not all may land within the same clock second. Accept a
-    # lower threshold that still demonstrates the burst pattern.
-    assert burst is not None and burst >= 5
+    rows = await _fingerprints(live_demo.base_url)
+    user_orders = [
+        int(str(r["call_count"]))
+        for r in rows
+        if "from orders" in str(r["fingerprint"]).lower()
+        and "user_id" in str(r["fingerprint"]).lower()
+    ]
+    assert user_orders and max(user_orders) >= 50, rows
 
 
 async def test_generator_runs_without_demo_mode(live_demo_non_demo) -> None:  # type: ignore[no-untyped-def]

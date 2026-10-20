@@ -56,24 +56,21 @@ class Settings(BaseSettings):
     # --- slowquery-detective tunables ---
     slowquery_threshold_ms: int = Field(default=100, gt=0)
     slowquery_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Where slowquery-detective keeps its tables (schema ``slowquery``);
+    # DATABASE_URL (the slow branch) when unset. Retention, batching and
+    # percentiles are the library's (spec 15); the 0.1-era drainer knobs
+    # SLOWQUERY_SAMPLE_RETENTION_S / SLOWQUERY_STATS_RECOMPUTE_INTERVAL_S are
+    # gone and ignored if still set.
     slowquery_store_url: str | None = None
-    # query_samples retention (seconds). The drainer prunes rows older than
-    # this on a periodic tick so the table doesn't grow without bound on
-    # free-tier Neon. 0 disables pruning. Default: 1 day.
-    slowquery_sample_retention_s: float = Field(default=86_400.0, ge=0.0)
-    # Minimum interval (seconds) between full percentile recomputes per
-    # fingerprint. Bursts within this window only bump total_ms/last_seen,
-    # coalescing the expensive percentile_cont recompute. 0 recomputes every
-    # sample (legacy behaviour).
-    slowquery_stats_recompute_interval_s: float = Field(default=2.0, ge=0.0)
 
     # --- LLM fallback (OpenRouter) ---
     llm_fallback_enabled: bool = False
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model_primary: str = ""
-    openrouter_model_fast: str = ""
-    openrouter_model_fallback: str = ""
+    # The portfolio's free OpenRouter models; never a paid default.
+    openrouter_model_primary: str = "google/gemma-4-26b-a4b-it:free"
+    openrouter_model_fast: str = "minimax/minimax-m3.1-flash:free"
+    openrouter_model_fallback: str = "google/gemma-4-31b-it:free"
 
     # NOTE: there are deliberately no NEON_API_KEY / NEON_PROJECT_ID fields.
     # Branch switching never calls the Neon API — spec 06 rules that out

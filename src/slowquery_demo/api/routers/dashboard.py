@@ -1,13 +1,16 @@
-"""Dashboard API at ``/_slowquery`` (specs 08 + 09).
+"""The demo's own routes under ``/_slowquery`` (specs 09, 11, 15).
 
-Reads the bookkeeping tables populated by the drainer
-(``core/observability.py``) and returns the data the Phase 4c
-dashboard frontend needs. Also serves an SSE stream at ``/api/stream``
-(spec 09) that pushes ``tick`` / ``heartbeat`` / ``branch_switched``
-events to the dashboard's live timeline chart.
+slowquery-detective 0.2 owns ``GET /_slowquery/queries`` and
+``GET /_slowquery/queries/{id}`` (mounted by ``install``) and removed the 0.1
+stream and apply routes. The dashboard still needs two more, which the demo
+keeps on top of the library's store:
 
-Mounted at ``/_slowquery`` by :func:`install_slowquery` in
-``core/observability.py``.
+* ``GET /api/stream`` — the SSE stream the live timeline plots (spec 09);
+* ``POST /queries/{id}/force-explain`` — the gated "re-analyze" action
+  (specs 05, 11).
+
+Mounted at ``/_slowquery`` by ``main.create_app``; behind the platform token
+like every other route there (spec 14).
 """
 
 from __future__ import annotations
@@ -16,116 +19,37 @@ import asyncio
 import collections.abc
 import json
 import re
-from datetime import UTC
-from typing import Annotated, Any
+from datetime import UTC, datetime
+from typing import Any, Final
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
+from slowquery_detective import QueryRow
+from slowquery_detective.llm_explainer import explain as llm_explain
+from slowquery_detective.rules import run_rules
 
 from slowquery_demo.core.access import enforce_cooldown, require_admin_token
-from slowquery_demo.core.database import get_db
-from slowquery_demo.repositories import slowquery_repository as repo
-from slowquery_demo.schemas.slowquery import (
-    FingerprintDetailResponse,
-    FingerprintResponse,
-    SuggestionResponse,
-)
 
 router = APIRouter(tags=["slowquery"])
 
-DbSession = Annotated[AsyncSession, Depends(get_db)]
+_FINGERPRINT_ID_RE: Final = re.compile(r"^[a-f0-9]{16}$")
+_STREAM_LIMIT: Final = 500
 
-_FINGERPRINT_ID_RE = re.compile(r"^[a-f0-9]{1,16}$")
-
-
-def _extract_rule(suggestion_rationale: str, suggestion_source: str) -> str | None:
-    """Derive the rule name for rule-sourced suggestions.
-
-    The library's ``run_rules`` stores the rule name at the start of the
-    rationale (e.g. "Seq Scan on orders with WHERE user_id; estimated
-    100,000 rows"). We can't recover it perfectly from the rationale
-    alone, so we expose the ``source`` field and let the frontend use
-    that for badge colouring. For a best-effort rule name, we check the
-    suggestion's ``kind`` + ``source`` + DDL prefix.
-    """
-    if suggestion_source != "rules":
-        return None
-    # The rules engine in slowquery-detective names its suggestions via
-    # the class attribute. We can't recover the exact name from the
-    # rationale, but the drainer could stash it. For now return None
-    # and let the frontend fall back to the kind.
-    return None
+# The synthetic plan force-explain stores: a bare Result node that no rule
+# matches, so the LLM fallback (when enabled) is what gets exercised.
+_SYNTHETIC_PLAN: Final[dict[str, Any]] = {"Plan": {"Node Type": "Result", "Total Cost": 0.01}}
 
 
-@router.get("/queries")
-async def list_queries(session: DbSession) -> list[FingerprintResponse]:
-    """Return all captured fingerprints sorted by total_ms desc."""
-    fingerprints = await repo.list_fingerprints(session)
-    all_suggestions = await repo.list_all_suggestions(session)
-    return [
-        FingerprintResponse.model_validate(
-            fp,
-            from_attributes=True,
-        ).model_copy(
-            update={
-                "suggestions": [
-                    SuggestionResponse.model_validate(s, from_attributes=True).model_copy(
-                        update={"rule": _extract_rule(s.rationale, s.source)}
-                    )
-                    for s in all_suggestions.get(fp.id, [])
-                ]
-            }
-        )
-        for fp in fingerprints
-    ]
-
-
-@router.get("/queries/{fingerprint_id}")
-async def get_query_detail(fingerprint_id: str, session: DbSession) -> FingerprintDetailResponse:
-    """Return the full detail for one fingerprint."""
-    if not _FINGERPRINT_ID_RE.match(fingerprint_id):
-        raise HTTPException(status_code=404, detail="not found")
-
-    fp = await repo.get_fingerprint_by_id(session, fingerprint_id)
-    if fp is None:
-        raise HTTPException(status_code=404, detail="not found")
-
-    suggestions = await repo.list_suggestions_for_fingerprint(session, fingerprint_id)
-    plan = await repo.get_explain_plan(session, fingerprint_id)
-    samples = await repo.list_recent_samples(session, fingerprint_id)
-
-    suggestion_dtos = [
-        SuggestionResponse.model_validate(s, from_attributes=True).model_copy(
-            update={"rule": _extract_rule(s.rationale, s.source)}
-        )
-        for s in suggestions
-    ]
-
-    fp_dto = FingerprintResponse.model_validate(fp, from_attributes=True).model_copy(
-        update={"suggestions": suggestion_dtos}
-    )
-
-    from slowquery_demo.schemas.slowquery import (
-        ExplainPlanResponse,
-        QuerySampleResponse,
-    )
-
-    return FingerprintDetailResponse(
-        fingerprint=fp_dto,
-        canonical_sql=fp.fingerprint,
-        explain_plan=(
-            ExplainPlanResponse.model_validate(plan, from_attributes=True) if plan else None
-        ),
-        suggestions=suggestion_dtos,
-        recent_samples=[
-            QuerySampleResponse.model_validate(s, from_attributes=True) for s in samples
-        ],
-    )
+def _runtime(request: Request) -> Any:
+    runtime = getattr(request.app.state, "slowquery_runtime", None)
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="slowquery not installed")
+    return runtime
 
 
 # ---------------------------------------------------------------------------
-# Spec 05 — force-explain endpoint
+# Spec 05 / 11 / 15 — force-explain
 # ---------------------------------------------------------------------------
 
 
@@ -134,64 +58,41 @@ async def get_query_detail(fingerprint_id: str, session: DbSession) -> Fingerpri
     dependencies=[Depends(enforce_cooldown), Depends(require_admin_token)],
 )
 async def force_explain(fingerprint_id: str, request: Request) -> dict[str, str]:
-    """Force an EXPLAIN run + rules/LLM evaluation for a fingerprint.
+    """Store a synthetic plan for a known fingerprint and re-run rules / LLM.
 
-    Used by the dashboard's "Re-analyze" button and exercised by
-    integration test 05-9 to verify LLM is called when rules miss.
-
-    This endpoint writes a synthetic plan and can overwrite a genuine
-    captured plan, so it is gated fail-closed behind
-    :func:`require_admin_token`: with no ``DEMO_MUTATION_TOKEN``
-    configured it returns 403 even under ``DEMO_MODE``, and a per-client
-    cooldown throttles authorized callers.
+    Gated fail-closed behind :func:`require_admin_token` (spec 11): with no
+    ``DEMO_MUTATION_TOKEN`` it answers 403 whatever the platform token says.
+    Since spec 15 it acts only on a fingerprint the library has recorded
+    (unknown ⇒ 404) and writes through the library's store: the plan with
+    ``upsert_plan``, suggestions with ``insert_suggestions``.
     """
     if not _FINGERPRINT_ID_RE.match(fingerprint_id):
         raise HTTPException(status_code=404, detail="not found")
+    runtime = _runtime(request)
+    if not await runtime.ensure_ready():
+        raise HTTPException(status_code=503, detail="slowquery store unavailable")
+    detail = await runtime.store.get_query(runtime.service, fingerprint_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="not found")
 
-    store = getattr(request.app.state, "slowquery_store", None)
-    if store is None:
-        raise HTTPException(status_code=503, detail="store not available")
+    await runtime.store.upsert_plan(fingerprint_id, _SYNTHETIC_PLAN, 0.01, datetime.now(UTC))
+    suggestions = run_rules(_SYNTHETIC_PLAN, detail.canonical_sql, fingerprint_id=fingerprint_id)
 
-    # Build a synthetic plan that rules will NOT match, forcing the
-    # LLM fallback path.
-    synthetic_plan = {
-        "Plan": {
-            "Node Type": "Result",
-            "Total Cost": 0.01,
-        }
-    }
-    canonical_sql = f"/* force-explain */ SELECT 1 -- {fingerprint_id}"
-
-    # Ensure fingerprint exists.
-    await store.upsert_fingerprint(fingerprint_id, canonical_sql)
-    await store.upsert_plan(
-        fingerprint_id, plan_json=synthetic_plan, plan_text=str(synthetic_plan), cost=0.01
-    )
-
-    # Run the rules engine. If rules don't match, invoke LLM fallback.
-    from slowquery_detective.rules import run_rules
-
-    suggestions = run_rules(synthetic_plan, canonical_sql, fingerprint_id=fingerprint_id)
-
-    if not suggestions:
-        # Rules didn't match — try LLM fallback via the worker's explainer.
-        worker = getattr(request.app.state, "slowquery_worker", None)
-        explainer = getattr(worker, "_explainer", None) if worker else None
-        if explainer is not None:
-            try:
-                llm_suggestion = await explainer(
-                    canonical_sql,
-                    synthetic_plan,
-                    fingerprint_id=fingerprint_id,
-                )
-                if llm_suggestion is not None:
-                    suggestions = [llm_suggestion]
-            except Exception:
-                pass
+    llm_config = getattr(request.app.state, "llm_config", None)
+    if not suggestions and llm_config is not None:
+        async with httpx.AsyncClient() as client:
+            found = await llm_explain(
+                detail.canonical_sql,
+                _SYNTHETIC_PLAN,
+                config=llm_config,
+                fingerprint_id=fingerprint_id,
+                client=client,
+            )
+        if found is not None:
+            suggestions = [found]
 
     if suggestions:
-        await store.insert_suggestions(fingerprint_id, suggestions)
-
+        await runtime.store.insert_suggestions(fingerprint_id, suggestions)
     return {"status": "ok", "suggestions_count": str(len(suggestions))}
 
 
@@ -202,18 +103,21 @@ async def force_explain(fingerprint_id: str, request: Request) -> dict[str, str]
 _SSE_POLL_INTERVAL_S = 2.0
 
 
-async def _poll_fingerprints(request: Request) -> list[Any]:
-    """Read fingerprints using a short-lived session opened for this tick.
+async def _poll_fingerprints(request: Request) -> list[QueryRow]:
+    """Read the fingerprints' p95 from slowquery-detective's store (spec 15).
 
-    A long-lived SSE stream must not pin a pooled DB connection for its
-    whole lifetime — a handful of open dashboard tabs would exhaust the
-    pool and 503 everything, including ``/health``. Each poll opens a
-    fresh ``AsyncSession`` from the app's sessionmaker and releases it
-    (and its connection) before sleeping until the next tick.
+    The store runs on the library's own small engine, so the stream never
+    pins a commerce connection (and is never itself observed). A store that
+    cannot start yet (Neon asleep) yields no rows, which the generator turns
+    into a heartbeat rather than an error.
     """
-    factory = request.app.state.db_sessionmaker
-    async with factory() as session:
-        return await repo.list_fingerprints(session)
+    runtime = _runtime(request)
+    if not await runtime.ensure_ready():
+        return []
+    rows: list[QueryRow] = await runtime.store.list_queries(
+        runtime.service, since=None, limit=_STREAM_LIMIT
+    )
+    return rows
 
 
 async def _sse_generator(
@@ -226,8 +130,6 @@ async def _sse_generator(
     poll tick (see :func:`_poll_fingerprints`) instead of holding one
     open for the whole connection.
     """
-    from datetime import datetime
-
     last_p95: dict[str, float | None] = {}
 
     # Emit an initial batch immediately so the client gets data before

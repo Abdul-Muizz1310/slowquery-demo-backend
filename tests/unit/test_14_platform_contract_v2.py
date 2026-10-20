@@ -128,8 +128,8 @@ def _client(**env: str) -> TestClient:
     from tests.test_health import _OkEngine
 
     app = create_app()
-    app.state.branch_switcher._engine_builder = None
-    app.state.engine = _OkEngine()  # /health answers 200 without a database
+    app.state.branch_switcher._retarget = None
+    app.state.health_engine = _OkEngine()  # /health answers 200 without a database
 
     async def _session() -> AsyncGenerator[AsyncMock, None]:
         session = AsyncMock()
