@@ -33,7 +33,7 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
 
     app = create_app()
     switcher = app.state.branch_switcher
-    switcher._engine_builder = None  # no Neon dial; state-only switch
+    switcher._retarget = None  # no Neon dial; state-only switch
 
     async def _override() -> AsyncGenerator[AsyncMock, None]:
         session = AsyncMock()
@@ -67,12 +67,9 @@ def test_force_explain_rejects_wrong_token(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_force_explain_passes_gate_with_correct_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spec 11 test 3: a correct token clears the gate (handler then hits the store).
-
-    The unit-lane store points at a dummy localhost URL, so the call
-    proceeds past the 403/429 gate and fails later at the DB boundary —
-    the assertion is only that the auth gate did not reject it.
-    """
+    """Spec 11 test 3: a correct token clears the gate (the handler then answers
+    for the id itself: 404 for one the store does not know). The assertion is
+    only that the admin gate did not reject it."""
     client = _build_client(monkeypatch, DEMO_MUTATION_TOKEN="s3cret")
     resp = client.post(
         "/_slowquery/queries/abc123/force-explain",
@@ -81,68 +78,93 @@ def test_force_explain_passes_gate_with_correct_token(monkeypatch: pytest.Monkey
     assert resp.status_code not in (403, 429)
 
 
-def test_force_explain_writes_plan_and_reports_suggestion_count(
+_FP = "7f9c44d378fe11e2"
+
+
+async def _memory_store_with(client: TestClient, fingerprint_id: str) -> object:
+    """Swap in slowquery-detective's in-memory store holding one fingerprint."""
+    import time as _time
+
+    from slowquery_detective import InMemoryStoreWriter
+    from slowquery_detective.recorder import Batch, FingerprintDelta
+
+    store = InMemoryStoreWriter()
+    await store.start()
+    now = _time.time()
+    await store.write_batch(
+        "slowquery",
+        Batch(
+            fingerprints={
+                fingerprint_id: FingerprintDelta(
+                    canonical_sql="select orders.id from orders order by orders.created_at desc",
+                    calls=1,
+                    total_ms=150.0,
+                    max_ms=150.0,
+                    first_seen=now,
+                    last_seen=now,
+                )
+            }
+        ),
+    )
+    client.app.state.slowquery_runtime.store = store  # type: ignore[attr-defined]
+    return store
+
+
+async def test_force_explain_writes_plan_and_reports_suggestion_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec 11 test 3 (past the gate): with a token *and* a working store, the
-    handler upserts the fingerprint, writes the synthetic plan, and reports how
-    many suggestions came out.
-
-    ``test_force_explain_passes_gate_with_correct_token`` only asserts the gate
-    did not refuse; the store then fails against the dummy localhost URL, so the
-    handler body itself had no coverage. Substituting the store covers it.
-    """
+    """Spec 11 test 3 (past the gate), on the library store (spec 15 case 10):
+    with a token and a recorded fingerprint, the handler stores the synthetic
+    plan and reports how many suggestions came out."""
     client = _build_client(monkeypatch, DEMO_MUTATION_TOKEN="s3cret")
-    store = AsyncMock()
-    client.app.state.slowquery_store = store  # type: ignore[attr-defined]
+    store = await _memory_store_with(client, _FP)
 
     resp = client.post(
-        "/_slowquery/queries/abc123/force-explain",
+        f"/_slowquery/queries/{_FP}/force-explain",
         headers={"X-Admin-Token": "s3cret"},
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "ok"
     # The synthetic plan is a bare Result node, which no rule matches, and the
-    # unit-lane app has no LLM explainer wired — so zero suggestions.
+    # unit-lane app has no LLM configured, so zero suggestions.
     assert body["suggestions_count"] == "0"
-
-    store.upsert_fingerprint.assert_awaited_once()
-    assert store.upsert_fingerprint.await_args.args[0] == "abc123"
-    store.upsert_plan.assert_awaited_once()
-    plan = store.upsert_plan.await_args.kwargs["plan_json"]
-    assert plan["Plan"]["Node Type"] == "Result"
-    store.insert_suggestions.assert_not_awaited()
+    detail = await store.get_query("slowquery", _FP)  # type: ignore[attr-defined]
+    assert detail is not None and detail.explain_plan is not None
+    assert detail.explain_plan.plan_json["Plan"]["Node Type"] == "Result"
+    assert detail.suggestions == []
 
 
-def test_force_explain_without_a_store_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Negative space: an app whose store was never wired fails closed with 503,
+def test_force_explain_without_slowquery_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative space: an app without the library runtime fails closed with 503,
     not an AttributeError 500."""
     client = _build_client(monkeypatch, DEMO_MUTATION_TOKEN="s3cret")
-    client.app.state.slowquery_store = None  # type: ignore[attr-defined]
+    client.app.state.slowquery_runtime = None  # type: ignore[attr-defined]
 
     resp = client.post(
-        "/_slowquery/queries/abc123/force-explain",
+        f"/_slowquery/queries/{_FP}/force-explain",
         headers={"X-Admin-Token": "s3cret"},
     )
     assert resp.status_code == 503
 
 
-def test_force_explain_rejects_malformed_fingerprint_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The id is validated before any store write, so a path payload can never
-    reach the database layer."""
+@pytest.mark.parametrize("bad", ["NOT-HEX!", "abc123", "7F9C44D378FE11E2", f"{_FP}0"])
+async def test_force_explain_rejects_malformed_fingerprint_id(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """The id must be 16 lowercase hex characters, checked before the store is touched."""
     client = _build_client(monkeypatch, DEMO_MUTATION_TOKEN="s3cret")
-    store = AsyncMock()
-    client.app.state.slowquery_store = store  # type: ignore[attr-defined]
+    store = await _memory_store_with(client, _FP)
 
     resp = client.post(
-        "/_slowquery/queries/NOT-HEX!/force-explain",
+        f"/_slowquery/queries/{bad}/force-explain",
         headers={"X-Admin-Token": "s3cret"},
     )
 
     assert resp.status_code == 404
-    store.upsert_fingerprint.assert_not_awaited()
+    detail = await store.get_query("slowquery", _FP)  # type: ignore[attr-defined]
+    assert detail is not None and detail.explain_plan is None
 
 
 # --- branch switch: cooldown + optional lockdown ----------------------------
@@ -219,6 +241,7 @@ class _FakeRequest:
             self.app.state.mutation_limiter = limiter
         self.headers = {"x-admin-token": token} if token is not None else {}
         self.client = _FakeClient(host)
+        self.state = _FakeState()  # no platform principal: an anonymous caller
 
 
 class _Settings:

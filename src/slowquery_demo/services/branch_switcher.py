@@ -1,11 +1,11 @@
-"""Branch-swap business logic (spec 06 + spec 10).
+"""Branch-swap business logic (spec 06 + spec 15).
 
-The switcher owns a lock that serializes concurrent switch requests
-and tracks the currently-active branch. Engine construction /
-disposal is delegated to an ``engine_builder`` async callable provided
-by ``main.py``. When the callable is provided, switching actually
-rebuilds the AsyncEngine + session factory and swaps them on
-``app.state``, closing the DEVIATIONS §3 gap.
+The switcher owns a lock that serializes concurrent switch requests and
+tracks the currently-active branch. Moving the connections is delegated to a
+``retarget`` async callable provided by ``main.py``: it health-checks the
+target URL, points the app's engines at it and disposes their pools (spec
+15; spec 10's engine rebuild is superseded, because slowquery-detective is
+bound to one engine for the app's lifetime).
 """
 
 from __future__ import annotations
@@ -15,22 +15,17 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any
 
 from slowquery_demo.core.branch_state import BranchName, save_branch
 
 logger = logging.getLogger(__name__)
 
-# Type for the engine-builder closure. It receives the target URL and
-# returns (new_engine, new_session_factory) — or raises on health-check
-# failure so the switch aborts cleanly.
-EngineBuilder = Callable[[str], Awaitable[tuple[Any, Any]]]
+# Receives the target URL; raises when the target is unreachable so the
+# switch aborts with nothing changed.
+Retarget = Callable[[str], Awaitable[None]]
 
-# Type for the post-switch hook. It runs after a successful engine swap
-# and performs app-state side effects (clear the rolling buffer, re-
-# attach the observability hooks to the new engine). It owns no HTTP or
-# FastAPI concepts of its own — ``main.py`` injects a closure over the
-# app so this service stays free of framework imports.
+# Runs after a successful retarget (clears the rolling percentiles). It owns
+# no HTTP or FastAPI concepts — ``main.py`` injects a closure over the app.
 PostSwitch = Callable[[], Awaitable[None]]
 
 
@@ -43,13 +38,13 @@ class BranchSwitcher:
         initial: BranchName,
         slow_url: str,
         fast_url: str,
-        engine_builder: EngineBuilder | None = None,
+        retarget: Retarget | None = None,
         post_switch: PostSwitch | None = None,
     ) -> None:
         self._active: BranchName = initial
         self._slow_url = slow_url
         self._fast_url = fast_url
-        self._engine_builder = engine_builder
+        self._retarget = retarget
         self._post_switch = post_switch
         self._lock = asyncio.Lock()
 
@@ -65,26 +60,20 @@ class BranchSwitcher:
         ``target`` already is the active branch — the handler maps
         that to a 409 response.
 
-        When ``engine_builder`` is provided (production path), the
-        switcher builds a new engine against the target URL, health-
-        checks it, and atomically swaps ``app.state.engine`` +
-        ``app.state.db_sessionmaker``. The old engine is disposed
-        asynchronously with a 5-second grace window.
-
-        After a successful swap the ``post_switch`` hook (if provided)
-        runs to clear the rolling buffer and re-attach the observability
-        hooks to the new engine (spec 06 invariant 5). It runs only when
-        the engine was actually rebuilt — a state-only switch (no
-        ``engine_builder``) records no new samples to invalidate.
+        When ``retarget`` is provided (production path) it moves the app's
+        connections to the target branch first; if it raises, nothing changes.
+        After it succeeds the ``post_switch`` hook (if provided) clears the
+        rolling percentiles (spec 06 invariant 5). A state-only switch (no
+        ``retarget``, unit tests) records no new samples to invalidate.
         """
         async with self._lock:
             if target == self._active:
                 raise ValueError(f"already on {target}")
             start = time.monotonic()
-            if self._engine_builder is not None:
+            if self._retarget is not None:
                 url = self._slow_url if target == "slow" else self._fast_url
-                await self._engine_builder(url)
-                logger.info("engine rebuilt for branch=%s", target)
+                await self._retarget(url)
+                logger.info("connections repointed to branch=%s", target)
                 if self._post_switch is not None:
                     await self._post_switch()
             self._active = target

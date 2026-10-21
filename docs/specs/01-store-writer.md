@@ -1,5 +1,9 @@
 # Spec 01 — Concrete `StoreWriter`
 
+> **Superseded by [spec 15](15-slowquery-detective-0-2.md) (2026-10-20).** slowquery-detective 0.2 ships its
+> own `PostgresStoreWriter` (schema `slowquery`); the demo's writer and its tests are gone. This spec is kept
+> as the record of what the 0.1-era demo did.
+
 ## Goal
 
 `slowquery-detective` ships `StoreWriter` as an abstract base that raises `NotImplementedError` from every method — see [`slowquery-detective/src/slowquery_detective/store.py`](https://github.com/Abdul-Muizz1310/slowquery-detective/blob/main/src/slowquery_detective/store.py). This spec defines `slowquery_demo.services.store.PostgresStoreWriter`, the asyncpg-backed subclass that persists fingerprints, samples, plans, and suggestions into the four bookkeeping tables from Spec 00. It is the glue that turns the library's observability data into rows the dashboard can query.

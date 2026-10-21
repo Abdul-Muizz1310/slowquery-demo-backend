@@ -9,7 +9,7 @@
 
 ## Goal
 
-`DEMO_MODE=true` makes the platform-token middleware accept every request, which is what lets a stranger
+*(Since contract v2, [spec 14](14-platform-contract-v2.md): `DEMO_MODE=true` only admits requests that carry no token; both endpoints otherwise need a valid platform token, and these gates apply on top.)* `DEMO_MODE=true` made the platform-token middleware accept every request, which is what let a stranger
 click through the demo. That also left the two endpoints with lasting, cross-visitor side effects
 unauthenticated on a public URL:
 

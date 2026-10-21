@@ -1,5 +1,9 @@
 # Spec 09 — SSE stream endpoint (closing the SSE gap)
 
+> **Updated by [spec 15](15-slowquery-detective-0-2.md) (2026-10-20):** the stream now reads each
+> fingerprint's p95 from slowquery-detective's store (`list_queries`) instead of the demo's bookkeeping
+> tables; a store that cannot start yields heartbeats. The event protocol below is unchanged.
+
 ## Goal
 
 Add `GET /_slowquery/api/stream` that sends Server-Sent Events to the Phase 4c dashboard. Polling-backed: re-queries `query_fingerprints` every ~2s and pushes `tick` events for any p95 changes since the last emission. Sends periodic `heartbeat` events to keep the connection alive.

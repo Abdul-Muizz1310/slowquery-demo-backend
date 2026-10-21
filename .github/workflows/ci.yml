@@ -98,7 +98,8 @@ jobs:
             echo "$db: $got (head $head)"
             test "$got" = "$head"
             n=$(PGPASSWORD=demo psql -h 127.0.0.1 -p "$port" -U demo -d "$db" -tAc \
-              "SELECT count(*) FROM pg_constraint WHERE conname = 'uq_suggestions_fp_kind_sql'")
+              "SELECT count(*) FROM pg_constraint WHERE conname = 'uq_suggestions_fp_kind_sql'
+               AND conrelid = 'public.suggestions'::regclass")
             test "$n" = "1"
           done
 

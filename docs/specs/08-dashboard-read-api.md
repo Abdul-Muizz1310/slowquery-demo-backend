@@ -1,5 +1,10 @@
 # Spec 08 — Real dashboard read API (closing DEVIATIONS §8)
 
+> **Superseded by [spec 15](15-slowquery-detective-0-2.md) (2026-10-20).** `GET /_slowquery/queries` and
+> `GET /_slowquery/queries/{id}` are now slowquery-detective 0.2's routes (with `?request_id=&since=&limit=`)
+> and return its `QueryRow` / `QueryDetail` models; spec 15 lists the shape differences. Kept as the record of
+> the 0.1-era routes.
+
 ## Goal
 
 Replace the stub `GET /_slowquery/queries` (returns `[]`) with a real implementation that reads the `query_fingerprints`, `explain_plans`, `suggestions`, and `query_samples` bookkeeping tables and returns the data the Phase 4c dashboard expects. Add `GET /_slowquery/queries/{id}` for the detail view.

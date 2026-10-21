@@ -1,8 +1,10 @@
-"""S4: unit-lane tests for spec 10 (engine rebuild on branch switch).
+"""Unit-lane tests for the switcher's connection move (spec 10, as superseded by spec 15).
 
-These tests verify the BranchSwitcher integration with the engine_builder
-callable, using an async mock. Real Postgres engine rebuild is integration-
-lane (Testcontainers with two databases).
+Spec 15 replaced the engine rebuild with a retarget of the one observed
+engine; the switcher's contract around that callable (target URL, ordering,
+serialization, failure leaves everything as it was) is what these cases pin,
+with an async mock. The real move is integration-lane (two Postgres
+containers) and spec 15's unit cases drive ``main._make_retarget``.
 """
 
 from __future__ import annotations
@@ -16,55 +18,53 @@ from slowquery_demo.services.branch_switcher import BranchSwitcher
 
 
 @pytest.fixture
-def mock_engine_builder() -> AsyncMock:
-    builder = AsyncMock()
-    builder.return_value = (MagicMock(), MagicMock())
-    return builder
+def mock_retarget() -> AsyncMock:
+    return AsyncMock(return_value=None)
 
 
 @pytest.mark.asyncio
-async def test_switch_calls_engine_builder_with_target_url(
-    mock_engine_builder: AsyncMock,
+async def test_switch_calls_retarget_with_target_url(
+    mock_retarget: AsyncMock,
 ) -> None:
-    """Spec 10 test 1: after switch to 'fast', the engine_builder receives the fast URL."""
+    """Spec 10 test 1: after switch to 'fast', the retarget receives the fast URL."""
     switcher = BranchSwitcher(
         initial="slow",
         slow_url="postgresql://slow",
         fast_url="postgresql://fast",
-        engine_builder=mock_engine_builder,
+        retarget=mock_retarget,
     )
     await switcher.switch("fast")
-    mock_engine_builder.assert_awaited_once_with("postgresql://fast")
+    mock_retarget.assert_awaited_once_with("postgresql://fast")
 
 
 @pytest.mark.asyncio
 async def test_switch_back_to_slow_uses_slow_url(
-    mock_engine_builder: AsyncMock,
+    mock_retarget: AsyncMock,
 ) -> None:
     """Spec 10 test 2: switch back to slow routes to the slow URL."""
     switcher = BranchSwitcher(
         initial="slow",
         slow_url="postgresql://slow",
         fast_url="postgresql://fast",
-        engine_builder=mock_engine_builder,
+        retarget=mock_retarget,
     )
     await switcher.switch("fast")
-    mock_engine_builder.reset_mock()
+    mock_retarget.reset_mock()
     await switcher.switch("slow")
-    mock_engine_builder.assert_awaited_once_with("postgresql://slow")
+    mock_retarget.assert_awaited_once_with("postgresql://slow")
 
 
 @pytest.mark.asyncio
-async def test_engine_builder_failure_aborts_switch(
-    mock_engine_builder: AsyncMock,
+async def test_retarget_failure_aborts_switch(
+    mock_retarget: AsyncMock,
 ) -> None:
     """Spec 10 test 3: if engine_builder raises, active branch stays unchanged."""
-    mock_engine_builder.side_effect = ConnectionError("neon is down")
+    mock_retarget.side_effect = ConnectionError("neon is down")
     switcher = BranchSwitcher(
         initial="slow",
         slow_url="postgresql://slow",
         fast_url="postgresql://fast",
-        engine_builder=mock_engine_builder,
+        retarget=mock_retarget,
     )
     with pytest.raises(ConnectionError):
         await switcher.switch("fast")
@@ -89,7 +89,7 @@ async def test_concurrent_switches_serialized() -> None:
         initial="slow",
         slow_url="postgresql://slow",
         fast_url="postgresql://fast",
-        engine_builder=slow_builder,
+        retarget=slow_builder,
     )
     t1 = asyncio.create_task(switcher.switch("fast"))
     await call_event.wait()
@@ -100,47 +100,47 @@ async def test_concurrent_switches_serialized() -> None:
     await t1
 
 
-def test_make_engine_builder_is_callable() -> None:
-    """Spec 10 test 5: _make_engine_builder returns a callable."""
-    from slowquery_demo.main import _make_engine_builder
+def test_make_retarget_is_callable() -> None:
+    """Spec 10 test 5: _make_retarget returns a callable."""
+    from slowquery_demo.main import _make_retarget
 
     app = MagicMock()
-    builder = _make_engine_builder(app)
+    builder = _make_retarget(app)
     assert callable(builder)
 
 
 @pytest.mark.asyncio
 async def test_post_switch_runs_after_successful_engine_rebuild(
-    mock_engine_builder: AsyncMock,
+    mock_retarget: AsyncMock,
 ) -> None:
     """Spec 06 invariant 5: the post-switch hook fires after the swap.
 
-    The hook runs after ``engine_builder`` returns (the new engine is on
-    ``app.state``) and before the switch returns.
+    The hook runs after ``retarget`` returns (connections now go to the
+    target) and before the switch returns.
     """
     post_switch = AsyncMock()
     switcher = BranchSwitcher(
         initial="slow",
         slow_url="postgresql://slow",
         fast_url="postgresql://fast",
-        engine_builder=mock_engine_builder,
+        retarget=mock_retarget,
         post_switch=post_switch,
     )
     await switcher.switch("fast")
     post_switch.assert_awaited_once_with()
-    # Ordering: the engine must have been rebuilt before the hook ran.
-    mock_engine_builder.assert_awaited_once_with("postgresql://fast")
+    # Ordering: the connections must have moved before the hook ran.
+    mock_retarget.assert_awaited_once_with("postgresql://fast")
 
 
 @pytest.mark.asyncio
-async def test_post_switch_skipped_when_no_engine_builder() -> None:
+async def test_post_switch_skipped_when_no_retarget() -> None:
     """A state-only switch records no new samples, so no hook runs."""
     post_switch = AsyncMock()
     switcher = BranchSwitcher(
         initial="slow",
         slow_url="postgresql://slow",
         fast_url="postgresql://fast",
-        engine_builder=None,
+        retarget=None,
         post_switch=post_switch,
     )
     await switcher.switch("fast")
@@ -149,16 +149,16 @@ async def test_post_switch_skipped_when_no_engine_builder() -> None:
 
 @pytest.mark.asyncio
 async def test_post_switch_skipped_when_engine_rebuild_fails(
-    mock_engine_builder: AsyncMock,
+    mock_retarget: AsyncMock,
 ) -> None:
     """If the rebuild raises, the active branch and buffer stay untouched."""
-    mock_engine_builder.side_effect = ConnectionError("neon is down")
+    mock_retarget.side_effect = ConnectionError("neon is down")
     post_switch = AsyncMock()
     switcher = BranchSwitcher(
         initial="slow",
         slow_url="postgresql://slow",
         fast_url="postgresql://fast",
-        engine_builder=mock_engine_builder,
+        retarget=mock_retarget,
         post_switch=post_switch,
     )
     with pytest.raises(ConnectionError):

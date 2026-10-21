@@ -16,11 +16,9 @@ dependencies = [
     "httpx>=0.27",
     "prometheus-fastapi-instrumentator>=8.1.0",
     "pyjwt[crypto]>=2.9",
-    # Pinned exactly: core/observability.py monkeypatches this library's
-    # v0.1.0 internals (hooks.attach, middleware.StoreWriter, the
-    # add_event_handler compat stub). Any upstream release could silently
-    # break those shims, so we do not float this dependency.
-    "slowquery-detective==0.1.0",
+    # 0.2 upstreamed the four shims this demo carried (DEVIATIONS §8): no
+    # monkeypatching left, so the public 0.2 API is all we depend on.
+    "slowquery-detective[fastapi,postgres]>=0.2,<0.3",
 ]
 
 [project.optional-dependencies]

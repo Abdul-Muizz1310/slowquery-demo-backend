@@ -106,9 +106,31 @@ def _run_alembic(
     )
 
 
+def _drop_library_schema(async_url: str) -> None:
+    """Drop slowquery-detective's schema; alembic does not own it (spec 15)."""
+    from slowquery_demo.core.db_config import to_raw_asyncpg_dsn
+
+    script = (
+        "import asyncio, sys, asyncpg\n"
+        "async def main():\n"
+        "    conn = await asyncpg.connect(sys.argv[1])\n"
+        "    try:\n"
+        "        await conn.execute('DROP SCHEMA IF EXISTS slowquery CASCADE')\n"
+        "    finally:\n"
+        "        await conn.close()\n"
+        "asyncio.run(main())\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", script, to_raw_asyncpg_dsn(async_url)],
+        check=True,
+        capture_output=True,
+    )
+
+
 def _migrate_fresh(async_url: str) -> None:
-    """Downgrade base then upgrade head for a clean schema."""
+    """A clean database: no library schema, then downgrade base and upgrade head."""
     env = {**os.environ, "DATABASE_URL": async_url}
+    _drop_library_schema(async_url)
     _run_alembic(["downgrade", "base"], env, check=False)
     result = _run_alembic(["upgrade", "head"], env)
     if result.returncode != 0:
@@ -344,11 +366,11 @@ def _build_app(
 
     app = create_app()
 
-    # Disable the real engine-builder so branch-switch tests don't
-    # try to connect to Neon.
+    # A state-only switcher: these apps have one database, so a switch must
+    # not try to reach a second one.
     switcher = getattr(app.state, "branch_switcher", None)
     if switcher is not None:
-        switcher._engine_builder = None  # type: ignore[attr-defined]
+        switcher._retarget = None  # type: ignore[attr-defined]
 
     return app
 
@@ -432,7 +454,7 @@ def seeded_app(
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("DATABASE_URL_FAST", async_url)
     monkeypatch.setenv("SLOWQUERY_STORE_URL", async_url)
-    # Low threshold so the drainer picks up all queries.
+    # Low threshold so every query is a slow sample with an EXPLAIN job.
     monkeypatch.setenv("SLOWQUERY_THRESHOLD_MS", "1")
 
     _migrate_fresh(async_url)
@@ -611,31 +633,8 @@ def dual_pg_app(
 
     app = create_app()
 
-    # Wire up a real engine builder that can switch between the two
-    # containers. Re-attaches slowquery hooks to the new engine.
-    from slowquery_demo.core.database import build_engine
-
-    async def _rebuild(url: str) -> tuple[Any, Any]:
-        new_engine, new_factory = build_engine(url)
-        old_engine = app.state.engine
-        app.state.engine = new_engine
-        app.state.db_sessionmaker = new_factory
-
-        # Re-attach slowquery hooks to the new engine so the drainer
-        # can observe queries on the switched branch.
-        buffer = getattr(app.state, "slowquery_buffer", None)
-        if buffer is not None:
-            from slowquery_demo.core.observability import _patched_attach
-
-            _patched_attach(new_engine, buffer, sample_rate=1.0)
-
-        await old_engine.dispose()
-        return new_engine, new_factory
-
-    app.state.branch_switcher._engine_builder = _rebuild
-    app.state.branch_switcher._slow_url = slow_url
-    app.state.branch_switcher._fast_url = fast_url
-
+    # The production retarget, unchanged (spec 15): it health-checks the
+    # fast container, repoints the one observed engine and disposes the pools.
     with TestClient(app) as client:
         yield client
 

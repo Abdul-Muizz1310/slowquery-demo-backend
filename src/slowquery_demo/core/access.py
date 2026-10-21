@@ -2,9 +2,9 @@
 
 Two independent, composable gates guard the only endpoints with lasting
 cross-visitor side effects (``POST /branches/switch`` and
-``POST /_slowquery/{id}/force-explain``). They apply *even while
-``DEMO_MODE`` bypasses the platform-token middleware*, closing the two
-HIGH findings from the audit:
+``POST /_slowquery/{id}/force-explain``). They apply on top of the
+platform token (spec 14) and *even while ``DEMO_MODE`` lets anonymous
+requests through*, closing the two HIGH findings from the audit:
 
 * :func:`enforce_cooldown` — a per-client in-process cooldown so a
   visitor cannot spam engine-rebuild churn (branch switch) or repeated
@@ -30,6 +30,8 @@ import time
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
+
+from slowquery_demo.core.platform_token import BASTION_ISS, Principal
 
 if TYPE_CHECKING:
     from slowquery_demo.core.config import Settings
@@ -65,10 +67,31 @@ class CooldownLimiter:
         return True
 
 
-def _client_key(request: Request) -> str:
-    """Stable per-caller key for the cooldown (client IP, else a constant)."""
+def _client_address(request: Request) -> str:
+    """The leftmost ``X-Forwarded-For`` address, else the socket peer."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    leftmost = forwarded.split(",")[0].strip()
+    if leftmost:
+        return leftmost
     client = request.client
     return client.host if client is not None else "unknown"
+
+
+def rate_limit_key(request: Request) -> str:
+    """The cooldown bucket (spec 14, contract v2 §2 as amended 2026-10-20).
+
+    * bastion's key: ``bastion:{sub}`` (``sub`` is the visitor pseudonym);
+    * the dashboard's key: ``slowquery-frontend:{address}``. A frontend's
+      ``sub`` is constant, so keying on it would put every visitor of the site
+      in one bucket; its proxy forwards exactly one client address;
+    * anonymous: the address alone.
+    """
+    principal: Principal | None = getattr(request.state, "platform_principal", None)
+    if principal is None:
+        return _client_address(request)
+    if principal.iss == BASTION_ISS:
+        return f"{BASTION_ISS}:{principal.sub}"
+    return f"{principal.iss}:{_client_address(request)}"
 
 
 def _get_settings(request: Request) -> Settings:
@@ -85,7 +108,7 @@ async def enforce_cooldown(request: Request) -> None:
     limiter: CooldownLimiter | None = getattr(request.app.state, "mutation_limiter", None)
     if limiter is None:
         return
-    if not limiter.allow(_client_key(request)):
+    if not limiter.allow(rate_limit_key(request)):
         raise HTTPException(
             status_code=429,
             detail="rate limited: this endpoint has a cooldown; retry shortly",

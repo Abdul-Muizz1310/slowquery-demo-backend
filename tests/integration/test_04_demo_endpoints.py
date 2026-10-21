@@ -85,71 +85,51 @@ def test_dead_pool_returns_503(test_client_dead_pool) -> None:  # type: ignore[n
 
 
 async def test_fingerprint_recorded_for_user_orders(seeded_app, pg_engine_noop) -> None:  # type: ignore[no-untyped-def]
-    """Spec 04 test 8.
-
-    Verify the slowquery middleware records fingerprints for user-order queries.
-    Checks the in-memory buffer (synchronous, reliable) rather than the async
-    DB store which the synchronous TestClient can't flush deterministically.
-    """
+    """Spec 04 test 8: slowquery-detective records the user-orders fingerprint (spec 15)."""
     sample_user_id = await _first_user(pg_engine_noop)
 
     for _ in range(5):
         seeded_app.get(f"/users/{sample_user_id}/orders")
 
-    app = seeded_app.app  # type: ignore[attr-defined]
-    buffer = getattr(app.state, "slowquery_buffer", None)
-    assert buffer is not None, "slowquery middleware should install a buffer"
-    assert len(buffer._samples) >= 1, f"expected fingerprints >= 1, got {len(buffer._samples)}"
+    rows = seeded_app.get("/_slowquery/queries", params={"limit": 500}).json()
+    orders = [r for r in rows if "from orders" in r["fingerprint"].lower()]
+    assert orders, [r["fingerprint"] for r in rows]
+    assert max(r["call_count"] for r in orders) >= 5
 
 
 async def test_rule_fires_on_slow_branch(seeded_app_slow, pg_engine_noop) -> None:  # type: ignore[no-untyped-def]
-    """Spec 04 test 9."""
+    """Spec 04 test 9: an EXPLAIN plan (and on this seed, usually a rule) appears.
+
+    The library's worker explains slow statements asynchronously; poll the
+    detail route until the user-orders fingerprint has a stored plan.
+    """
     import time
 
-    from sqlalchemy import text
-
     sample_user_id = await _first_user(pg_engine_noop)
-    seeded_app_slow.get(f"/users/{sample_user_id}/orders")
-
-    # The drainer + rules + EXPLAIN pipeline runs async. Poll until
-    # suggestions appear or timeout.
-    deadline = time.monotonic() + 15
-    suggestions = 0
-    fingerprints = 0
+    deadline = time.monotonic() + 30
+    detail: dict[str, object] = {}
     while time.monotonic() < deadline:
-        seeded_app_slow.get("/health")
-        time.sleep(0.5)
-        async with pg_engine_noop.connect() as conn:
-            fingerprints = await conn.scalar(text("SELECT COUNT(*) FROM query_fingerprints"))
-            suggestions = await conn.scalar(text("SELECT COUNT(*) FROM suggestions"))
-            explain_plans = await conn.scalar(text("SELECT COUNT(*) FROM explain_plans"))
-        if suggestions and suggestions >= 1:
-            break
-    # At minimum, the drainer must have recorded the fingerprint.
-    assert fingerprints >= 1, (
-        f"fingerprints={fingerprints}, suggestions={suggestions}, plans={explain_plans}"
-    )
-    # Suggestions require the full EXPLAIN→rules pipeline. With a small
-    # dataset the query may be too fast for a Seq Scan to fire rules.
-    # We accept either suggestions from rules or at least an EXPLAIN plan.
-    assert suggestions >= 1 or explain_plans >= 1, (
-        f"fingerprints={fingerprints}, suggestions={suggestions}, plans={explain_plans}"
-    )
+        seeded_app_slow.get(f"/users/{sample_user_id}/orders")
+        time.sleep(1.0)
+        rows = seeded_app_slow.get("/_slowquery/queries", params={"limit": 500}).json()
+        ids = [r["id"] for r in rows if "from orders" in r["fingerprint"].lower()]
+        if ids:
+            detail = seeded_app_slow.get(f"/_slowquery/queries/{ids[0]}").json()
+            if detail.get("explain_plan"):
+                break
+    assert detail.get("explain_plan"), detail
 
 
 async def test_rule_does_not_fire_on_fast_branch(seeded_app_fast, pg_engine_fast_noop) -> None:  # type: ignore[no-untyped-def]
-    """Spec 04 test 10."""
+    """Spec 04 test 10: on the indexed branch no index suggestion appears."""
     import asyncio
-
-    from sqlalchemy import text
 
     sample_user_id = await _first_user(pg_engine_fast_noop)
     seeded_app_fast.get(f"/users/{sample_user_id}/orders")
     await asyncio.sleep(5)
 
-    async with pg_engine_fast_noop.connect() as conn:
-        suggestions = await conn.scalar(text("SELECT COUNT(*) FROM suggestions"))
-    assert suggestions == 0
+    rows = seeded_app_fast.get("/_slowquery/queries", params={"limit": 500}).json()
+    assert [s for r in rows for s in r["suggestions"]] == []
 
 
 async def _first_user(engine) -> str:  # type: ignore[no-untyped-def]

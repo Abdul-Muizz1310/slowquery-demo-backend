@@ -28,4 +28,6 @@ EXPOSE 8000
 # The entrypoint migrates every configured database (slow + fast branch) before
 # handing off to the CMD; Render's free plan never runs a preDeployCommand.
 ENTRYPOINT ["./docker-entrypoint.sh"]
-CMD ["uvicorn", "slowquery_demo.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers / --forwarded-allow-ips: behind Render's proxy the visitor is
+# the leftmost X-Forwarded-For address (contract v2 rate limiting).
+CMD ["uvicorn", "slowquery_demo.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

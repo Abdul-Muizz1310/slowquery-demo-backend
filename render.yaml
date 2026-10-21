@@ -37,10 +37,20 @@ services:
         sync: false
       - key: CORS_ORIGINS
         value: "https://slowquery-dashboard-frontend.vercel.app,http://localhost:3000"
+      # Contract v2 (spec 14). DEMO_MODE=true only lets a request *without* a
+      # token through anonymous; it stays true until every minter (bastion,
+      # the dashboard proxy) sends tokens, then flips to false.
       - key: DEMO_MODE
         value: "true"
+      # Trusted keys: without one, protected routes answer 503.
+      - key: BASTION_SIGNING_KEY_PUBLIC
+        sync: false
+      - key: BASTION_PUBLIC_KEY_URL
+        sync: false
+      - key: SLOWQUERY_FRONTEND_SIGNING_KEY_PUBLIC
+        sync: false
       # Per-client cooldown (seconds) on the state-mutating endpoints
-      # (branch switch, force-explain), enforced even under DEMO_MODE.
+      # (branch switch, force-explain), enforced on top of the platform token.
       - key: DEMO_MUTATION_COOLDOWN_S
         value: "3"
       # Shared secret required to call the destructive force-explain

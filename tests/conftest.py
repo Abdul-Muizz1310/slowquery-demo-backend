@@ -34,7 +34,7 @@ def fake_locust_stats_high_failures():  # type: ignore[no-untyped-def]
 def _isolated_runtime(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     """Isolate each test from on-disk state that would leak across tests.
 
-    Two redirections per test:
+    Three settings per test:
 
     1. ``BRANCH_STATE_FILE`` points at ``tmp_path/.branch_state`` so the
        branch switcher's persistence file doesn't accumulate across
@@ -44,9 +44,22 @@ def _isolated_runtime(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
        repo-root ``.env``. Tests that monkeypatch individual env vars
        need to see those changes without the real ``.env`` adding
        its own values back in.
+    3. ``APP_ENV=test`` + ``DEMO_MODE=true``: the test settings of the
+       platform contract (spec 14). With no trusted key configured a
+       tokenless request proceeds anonymous, so suites about routes,
+       gating and streams need no tokens. The contract itself is tested
+       with production settings in ``tests/unit/test_14_platform_contract_v2.py``.
     """
     state_file = tmp_path / ".branch_state"
     monkeypatch.setenv("BRANCH_STATE_FILE", str(state_file))
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("DEMO_MODE", "true")
+    for name in (
+        "BASTION_SIGNING_KEY_PUBLIC",
+        "BASTION_PUBLIC_KEY_URL",
+        "SLOWQUERY_FRONTEND_SIGNING_KEY_PUBLIC",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
     yield
 
@@ -86,7 +99,7 @@ def test_client(empty_session: AsyncMock) -> Iterator[TestClient]:
     # integration-lane (spec 10).
     switcher = getattr(app.state, "branch_switcher", None)
     if switcher is not None:
-        switcher._engine_builder = None  # type: ignore[attr-defined]
+        switcher._retarget = None  # type: ignore[attr-defined]
 
     async def _override() -> AsyncGenerator[AsyncMock, None]:
         yield empty_session

@@ -38,10 +38,10 @@ before uvicorn starts. `0001` is not touched again.
 ## Migrating every branch at boot
 
 The service talks to up to three Postgres URLs: `DATABASE_URL` (the `slowquery` branch),
-`DATABASE_URL_FAST` (the `slowquery-fast` branch; `POST /branches/switch` swaps the commerce engine onto
-it, and the dashboard reads the bookkeeping tables through that engine), and `SLOWQUERY_STORE_URL` (where
-the store writer persists; defaults to `DATABASE_URL`). Each one carries the full schema, so each one is
-migrated.
+`DATABASE_URL_FAST` (the `slowquery-fast` branch; `POST /branches/switch` points the commerce engine at
+it), and `SLOWQUERY_STORE_URL` (where slowquery-detective persists; defaults to `DATABASE_URL`). Each one
+carries the full alembic schema, so each one is migrated. (slowquery-detective creates its own schema
+`slowquery` at runtime on the store database; alembic does not own it — spec 15.)
 
 ```python
 # scripts/migrate_all.py
@@ -114,8 +114,10 @@ def main(argv: list[str] | None = None) -> int: ...                          # r
 15. Live-shaped database (at `0001`, constraint dropped, duplicate rows inserted, including a `NULL`-`sql`
     pair and rows that are unique): `upgrade head` keeps the lowest `id` of each group, keeps every unique
     row, and adds the constraint.
-16. After 15, `PostgresStoreWriter.insert_suggestions` with an already-stored suggestion succeeds and adds
-    no row; a raw duplicate insert raises a unique violation.
+16. After 15, the 0.1-era store writer's `INSERT … ON CONFLICT (fingerprint_id, kind, sql) DO NOTHING` with
+    an already-stored suggestion succeeds and adds no row; a raw duplicate insert raises a unique violation.
+    (Since spec 15 the demo writes through slowquery-detective's schema `slowquery`; the statement is
+    replayed as SQL.)
 17. `upgrade head` twice in a row, and `stamp 0001` + `upgrade head`, both succeed and change nothing.
 18. `downgrade base` after `upgrade head` works on both the fresh and the live-shaped database.
 19. `scripts.migrate_all` against two separate Postgres databases (slow and fast) brings both to `0002`.

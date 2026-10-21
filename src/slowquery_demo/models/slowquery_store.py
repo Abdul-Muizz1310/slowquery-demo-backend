@@ -1,9 +1,10 @@
-"""Bookkeeping ORM models written by :class:`PostgresStoreWriter`.
+"""The 0.1-era bookkeeping tables (``public`` schema), kept but unwritten.
 
-These four tables match the data model in
-``slowquery-detective/docs/projects/50-slowquery-detective.md`` verbatim.
-They live in their own module so the commerce MVC layer never imports
-slowquery internals.
+slowquery-detective 0.2 keeps its own tables in schema ``slowquery`` (spec
+15); nothing writes these four any more. They stay mapped because migrations
+``0001``/``0002`` created them and still own them: autogenerate stays empty,
+and a rollback to the pre-0.2 release finds its tables. A later migration may
+drop them once 0.2 has settled.
 """
 
 from __future__ import annotations

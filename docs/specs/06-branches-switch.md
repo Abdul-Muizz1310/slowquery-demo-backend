@@ -40,7 +40,7 @@ The endpoint never touches the Neon API directly. The URL for each branch is wir
 5. The slowquery-detective middleware's buffer is cleared on switch. Fingerprints and samples from the previous branch would be misleading alongside fresh stats from the new branch.
 6. `query_fingerprints` etc. live on whichever branch `SLOWQUERY_STORE_URL` points at, which is independent of the switch. The switch only touches the demo engine, not the store engine.
 7. The endpoint returns within `SWITCH_TIMEOUT_MS + 1000` under every path (success, failure, refused). No request can hang forever.
-8. The endpoint is gated by `DEMO_MODE=true`. In non-demo mode it returns 403. This is enforced by the platform middleware's token check, not by ad-hoc code in the handler.
+8. The endpoint needs a platform token (contract v2, [spec 14](14-platform-contract-v2.md)): without one it answers 401 unless `DEMO_MODE=true` lets an anonymous request through. This is enforced by the platform middleware's token check, not by ad-hoc code in the handler. *(Superseded wording: "gated by `DEMO_MODE=true`, 403 in non-demo mode".)*
 
 ## Test cases
 
@@ -70,7 +70,7 @@ The endpoint never touches the Neon API directly. The URL for each branch is wir
 
 **Security / destructive-guard:**
 15. The endpoint body is a Pydantic model with `Literal["slow", "fast"]`. No raw string processing. A `Literal` mismatch is a 422, not a 400.
-16. `DEMO_MODE=false` returns 403 even if the body is well-formed. Enforced by platform middleware; test covers both paths.
+16. `DEMO_MODE=false` without a token returns 401 `missing_platform_token` even if the body is well-formed (spec 14 test 15); with a valid token it switches. Enforced by platform middleware.
 17. The handler never reads `DATABASE_URL` or `DATABASE_URL_FAST` from the environment at request time — they're captured once at startup in `Settings`. A test patches `os.environ` mid-test and confirms the switch endpoint uses the startup values.
 18. The endpoint does **not** accept DDL. There is no `--apply-index` payload, no `sql` field. The "apply index" button on the dashboard is a branch switch, not a DDL execution.
 19. An attacker sending `POST /branches/switch` in a tight loop cannot exhaust the new-engine construction path because the lock serializes. The handler is still O(1) per request.

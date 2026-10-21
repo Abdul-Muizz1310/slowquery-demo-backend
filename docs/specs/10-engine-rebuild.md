@@ -1,5 +1,10 @@
 # Spec 10 — Branch switch engine rebuild (closing DEVIATIONS §3)
 
+> **Superseded by [spec 15](15-slowquery-detective-0-2.md) (2026-10-20).** slowquery-detective 0.2 is bound
+> to one engine for the app's lifetime, so a switch no longer rebuilds the engine: it health-checks the
+> target, repoints the engine's connection target and disposes the pools. The switcher's contract (target
+> URL, serialization, a failure changes nothing) is still what `tests/unit/test_10_engine_rebuild.py` pins.
+
 ## Goal
 
 Wire the `engine_builder` callable into `BranchSwitcher` so `POST /branches/switch` actually rebuilds the `AsyncEngine` and `async_sessionmaker` against the target branch's URL. Subsequent queries route to the new branch.

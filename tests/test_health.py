@@ -60,7 +60,7 @@ def _app_with_engine(engine: object) -> FastAPI:
     from slowquery_demo.main import create_app
 
     app = create_app()
-    app.state.engine = engine
+    app.state.health_engine = engine
     return app
 
 
