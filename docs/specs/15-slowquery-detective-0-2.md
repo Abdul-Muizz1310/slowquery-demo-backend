@@ -31,7 +31,8 @@ install(app, engine, service="slowquery",
   other protected route, `DEMO_MODE` included.
 - LLM: `LLM_FALLBACK_ENABLED=true` without `OPENROUTER_API_KEY` fails at boot (`ConfigError`); the model
   slots default to the portfolio's free models (`google/gemma-4-26b-a4b-it:free`,
-  `minimax/minimax-m3.1-flash:free`, `google/gemma-4-31b-it:free`).
+  `xingchen-agi/xing4.0-29b-a4b:free` since minimax-m3.1-flash left OpenRouter on 2026-10-26,
+  `google/gemma-4-31b-it:free`).
 
 ## One observed engine, repointed on a branch switch (`core/database.py`, `main.py`; replaces spec 10's rebuild)
 
