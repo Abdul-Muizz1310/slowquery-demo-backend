@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 FREE_MODELS = (
     "google/gemma-4-26b-a4b-it:free",
-    "minimax/minimax-m3.1-flash:free",
+    "xingchen-agi/xing4.0-29b-a4b:free",
     "google/gemma-4-31b-it:free",
 )
 FP = "7f9c44d378fe11e2"
