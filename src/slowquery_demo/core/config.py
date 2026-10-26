@@ -69,7 +69,8 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # The portfolio's free OpenRouter models; never a paid default.
     openrouter_model_primary: str = "google/gemma-4-26b-a4b-it:free"
-    openrouter_model_fast: str = "minimax/minimax-m3.1-flash:free"
+    # minimax-m3.1-flash left OpenRouter on 2026-10-26; this one passed a JSON-mode smoke call.
+    openrouter_model_fast: str = "xingchen-agi/xing4.0-29b-a4b:free"
     openrouter_model_fallback: str = "google/gemma-4-31b-it:free"
 
     # NOTE: there are deliberately no NEON_API_KEY / NEON_PROJECT_ID fields.
